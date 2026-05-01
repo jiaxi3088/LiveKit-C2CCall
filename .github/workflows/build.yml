@@ -160,19 +160,25 @@ jobs:
               EXTRACT_TMP="$STAGING_DIR/_extract_$$"
               rm -rf "$EXTRACT_TMP"; mkdir -p "$EXTRACT_TMP"
               unzip -qo "$DEP_PATH" -d "$EXTRACT_TMP"
-              if [ -f "$EXTRACT_TMP/classes.jar" ]; then
+              if [ -f "$EXTRACT_TMP/classes.jar" ] && [ -s "$EXTRACT_TMP/classes.jar" ]; then
                 cp "$EXTRACT_TMP/classes.jar" "$MERGE_DIR/dep-${DEP_NAME%.aar}.jar"
                 JAR_SOURCES+=("$MERGE_DIR/dep-${DEP_NAME%.aar}.jar")
-                echo "  [+jar] ${DEP_NAME} -> classes.jar"
+                echo "  [+jar] ${DEP_NAME} -> classes.jar ($(du -h "$EXTRACT_TMP/classes.jar" | cut -f1))"
+              elif [ -f "$EXTRACT_TMP/classes.jar" ]; then
+                echo "  [skip] ${DEP_NAME} (classes.jar is empty)"
               else
                 echo "  [skip] ${DEP_NAME} (no classes.jar inside)"
               fi
               rm -rf "$EXTRACT_TMP"
 
             elif [[ "$DEP_NAME" == *.jar ]]; then
-              cp "$DEP_PATH" "$MERGE_DIR/dep-${DEP_NAME}"
-              JAR_SOURCES+=("$MERGE_DIR/dep-${DEP_NAME}")
-              echo "  [+jar] ${DEP_NAME}"
+              if [ -s "$DEP_PATH" ]; then
+                cp "$DEP_PATH" "$MERGE_DIR/dep-${DEP_NAME}"
+                JAR_SOURCES+=("$MERGE_DIR/dep-${DEP_NAME}")
+                echo "  [+jar] ${DEP_NAME}"
+              else
+                echo "  [skip] ${DEP_NAME} (empty file)"
+              fi
             fi
           done < "$DEP_LIST"
 
@@ -183,10 +189,15 @@ jobs:
           cp "${JAR_SOURCES[0]}" "$MERGED_JAR"
 
           for ((i=1; i<${#JAR_SOURCES[@]}; i++)); do
+            # 跳过空 JAR
+            if [ ! -s "${JAR_SOURCES[$i]}" ]; then
+              echo "  [skip-merge] $(basename "${JAR_SOURCES[$i]}") — empty"
+              continue
+            fi
             TMP_MERGE="$STAGING_DIR/_tmp_merge_$$"
             mkdir -p "$TMP_MERGE"
             unzip -qo "$MERGED_JAR" -d "$TMP_MERGE"
-            unzip -qo -o "${JAR_SOURCES[$i]}" -d "$TMP_MERGE"
+            unzip -qo -o "${JAR_SOURCES[$i]}" -d "$TMP_MERGE" 2>/dev/null || true
             rm -f "$MERGED_JAR"
             (cd "$TMP_MERGE" && jar cf "$MERGED_JAR" .)
             rm -rf "$TMP_MERGE"
