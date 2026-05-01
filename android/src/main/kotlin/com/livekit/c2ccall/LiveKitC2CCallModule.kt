@@ -18,7 +18,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
@@ -74,14 +73,19 @@ class LiveKitC2CCallModule : UniModule() {
                 val appContext = mUniSDKInstance?.context()?.applicationContext
                     ?: throw Exception("无法获取 Context")
 
+                // 初始化 LiveKit（必须在使用前调用）
+                LiveKit.init(appContext)
+
                 room = LiveKit.create(appContext)
 
-                // 注册房间事件监听
-                room!!.events.collectLatest { event ->
-                    handleRoomEvent(event)
+                // 在单独协程中收集房间事件（EventListenable.collect() 返回 Nothing，会一直运行）
+                scope.launch {
+                    room?.collect { event ->
+                        handleRoomEvent(event)
+                    }
                 }
 
-                // 连接到房间（LiveKit 2.x 简化 API）
+                // 连接到房间（suspend fun，会挂起直到断开连接）
                 room!!.connect(wsURL, token)
 
                 invokeSuccess(callback, "呼叫已发起")
@@ -128,12 +132,19 @@ class LiveKitC2CCallModule : UniModule() {
                 val appContext = mUniSDKInstance?.context()?.applicationContext
                     ?: throw Exception("无法获取 Context")
 
+                // 初始化 LiveKit（必须在使用前调用）
+                LiveKit.init(appContext)
+
                 room = LiveKit.create(appContext)
 
-                room!!.events.collectLatest { event ->
-                    handleRoomEvent(event)
+                // 在单独协程中收集房间事件
+                scope.launch {
+                    room?.collect { event ->
+                        handleRoomEvent(event)
+                    }
                 }
 
+                // 连接到房间（suspend fun，会挂起直到断开连接）
                 room!!.connect(wsURL, token)
 
                 invokeSuccess(callback, "已接听来电")
@@ -261,7 +272,7 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun observeRemoteParticipant(remote: RemoteParticipant) {
         scope.launch {
-            remote.events.collectLatest { event: ParticipantEvent ->
+            remote.collect { event ->
                 when (event) {
                     is ParticipantEvent.TrackPublished -> {
                         when (event.publication.kind) {
