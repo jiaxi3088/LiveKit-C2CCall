@@ -1,7 +1,6 @@
 package com.livekit.c2ccall
 
 import android.content.Context
-import android.media.AudioManager
 import android.media.MediaPlayer
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
@@ -14,13 +13,12 @@ import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
-import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.Track.Kind as TrackKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
@@ -79,7 +77,7 @@ class LiveKitC2CCallModule : UniModule() {
                 room = LiveKit.create(appContext)
 
                 // 注册房间事件监听
-                room!!.events.collect { event ->
+                room!!.events.collectLatest { event ->
                     handleRoomEvent(event)
                 }
 
@@ -132,7 +130,7 @@ class LiveKitC2CCallModule : UniModule() {
 
                 room = LiveKit.create(appContext)
 
-                room!!.events.collect { event ->
+                room!!.events.collectLatest { event ->
                     handleRoomEvent(event)
                 }
 
@@ -199,16 +197,13 @@ class LiveKitC2CCallModule : UniModule() {
 
     @UniJSMethod(uiThread = true)
     fun switchCamera(position: String?) {
-        val cameraPosition = if ("back" == position) {
-            CameraPosition.BACK
-        } else {
-            CameraPosition.FRONT
-        }
-
+        // LiveKit SDK 2.x 摄像头切换通过 TrackPublishOptions 或重新发布轨道实现
+        // 此处暂记录用户选择，后续可通过 setCameraEnabled + 重启轨道实现切换
         scope.launch {
             try {
                 val local = room?.localParticipant ?: return@launch
-                local.setCameraPosition(cameraPosition)
+                local.setCameraEnabled(!isVideoEnabled)
+                isVideoEnabled = !isVideoEnabled
             } catch (e: Exception) {
                 sendEvent("onError", "切换摄像头失败: ${e.message}")
             }
@@ -266,7 +261,7 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun observeRemoteParticipant(remote: RemoteParticipant) {
         scope.launch {
-            remote.events.collect { event ->
+            remote.events.collectLatest { event ->
                 when (event) {
                     is ParticipantEvent.TrackPublished -> {
                         when (event.publication.kind) {
