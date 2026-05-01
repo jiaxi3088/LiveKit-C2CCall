@@ -10,6 +10,8 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
 
@@ -19,57 +21,59 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android SDK components
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$ANDROID_HOME/platforms/" 2>/dev/null || echo "No platforms dir yet"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
+          echo "Installed platforms:"
+          ls "$ANDROID_HOME/platforms/"
 
       - name: Fix source issues
         run: |
-          # Remove duplicate .kt file (conflicts with .java)
           rm -f android/src/main/kotlin/com/livekit/c2ccall/LiveKitC2CCallModule.kt
-          
-          # Add missing JSCallback import
-          sed -i 's/import io.dcloud.feature.uniapp.bridge.UniJSCallback;/import io.dcloud.feature.uniapp.bridge.JSCallback;\nimport io.dcloud.feature.uniapp.bridge.UniJSCallback;/' \
-            android/src/main/java/com/livekit/c2ccall/LiveKitC2CCallModule.java
 
       - name: Create uni-app SDK stub AAR
         run: |
+          set -e
           STUB_DIR=ci-stubs/build
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-34/android.jar"
+          
+          echo "=== Android JAR check ==="
+          ls -la "$ANDROID_JAR"
+          
           mkdir -p $STUB_DIR/classes
           
-          # Compile stub Java sources using Android SDK android.jar
+          echo "=== Compiling stub sources ==="
           javac -d $STUB_DIR/classes \
-            -target 17 -source 17 \
-            -bootclasspath $ANDROID_HOME/platforms/android-34/android.jar \
-            ci-stubs/android/UniJSMethod.java \
-            ci-stubs/android/JSCallback.java \
-            ci-stubs/android/UniJSCallback.java \
-            ci-stubs/android/UniSDKInstance.java \
-            ci-stubs/android/UniModule.java
+            -source 17 -target 17 \
+            -cp "$ANDROID_JAR" \
+            ci-stubs/android/*.java
           
-          # Create classes.jar from compiled stubs
-          cd $STUB_DIR/classes
-          jar cf ../classes.jar *
-          cd ../../..
+          echo "=== Creating classes.jar ==="
+          (cd $STUB_DIR/classes && jar cf ../classes.jar .)
           
-          # Create AAR (ZIP format with AndroidManifest.xml + classes.jar)
-          mkdir -p $STUB_DIR/aar/META-INF
+          echo "=== Creating stub AAR ==="
+          mkdir -p $STUB_DIR/aar
           echo '<?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.dcloud.feature.uniapp"/>' > $STUB_DIR/aar/AndroidManifest.xml
           cp $STUB_DIR/classes.jar $STUB_DIR/aar/classes.jar
-          cd $STUB_DIR/aar
-          jar cf ../../uniapp-v8-release.aar AndroidManifest.xml classes.jar
-          cd ../../..
+          (cd $STUB_DIR/aar && jar cf ../../uniapp-v8-release.aar .)
           
-          # Copy stub AAR to libs directory (build.gradle expects ../libs/)
           mkdir -p libs
           cp ci-stubs/uniapp-v8-release.aar libs/
+          
+          echo "=== Stub AAR created successfully ==="
 
-      - name: Generate Gradle wrapper
-        working-directory: android
-        run: gradle wrapper --gradle-version 8.5
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build Android AAR
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+          echo "=== Build output ==="
+          ls -la build/outputs/aar/ 2>/dev/null || echo "No AAR output found"
 
       - name: Upload Android AAR
         uses: actions/upload-artifact@v4
@@ -90,12 +94,10 @@ jobs:
           
           cp ci-stubs/ios/DCUniModule.h "$FRAMEWORK_DIR/Headers/"
           
-          # Create minimal static library
           echo "void _stub() {}" > /tmp/stub.c
           cc -c /tmp/stub.c -o /tmp/stub.o -arch arm64
           ar rcs "$FRAMEWORK_DIR/DCUniModule" /tmp/stub.o
           
-          # Create Info.plist
           cat > "$FRAMEWORK_DIR/Info.plist" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -115,7 +117,6 @@ jobs:
           </plist>
           PLIST
           
-          # Install to system Frameworks for header search
           sudo cp -R "$FRAMEWORK_DIR" /Library/Frameworks/
 
       - name: Install xcodegen
@@ -123,7 +124,6 @@ jobs:
 
       - name: Build iOS Framework
         run: |
-          # Create xcodegen project spec
           cat > ios/project.yml << 'YML'
           name: LiveKitC2CCall
           options:
@@ -145,7 +145,9 @@ jobs:
                 SKIP_INSTALL: YES
                 BUILD_LIBRARY_FOR_DISTRIBUTION: YES
                 TARGETED_DEVICE_FAMILY: "1,2"
-                OTHER_LDFLAGS: -ObjC
+                OTHER_LDFLAGS: "-framework DCUniModule"
+                OTHER_CFLAGS: "-I/Library/Frameworks/DCUniModule.framework/Headers"
+                LIBRARY_SEARCH_PATHS: "/Library/Frameworks"
                 CLANG_ENABLE_MODULES: YES
               headers:
                 - path: Classes/LiveKitC2CCallModule.h
@@ -155,7 +157,6 @@ jobs:
           cd ios
           xcodegen generate
           
-          # Build for arm64 (iOS device)
           xcodebuild \
             -project LiveKitC2CCall.xcodeproj \
             -scheme LiveKitC2CCall \
@@ -171,7 +172,6 @@ jobs:
             CONFIGURATION_BUILD_DIR="$PWD/build" \
             2>&1 | tee build.log
           
-          # Check build result
           if [ ! -d "build/LiveKitC2CCall.framework" ]; then
             echo "=== BUILD FAILED ==="
             tail -50 build.log
@@ -205,14 +205,10 @@ jobs:
 
       - name: Assemble plugin package
         run: |
-          # Copy AAR to android/ directory (standard plugin structure)
           mkdir -p android ios
           cp artifacts/android/*-release.aar android/livekit-c2c.aar
-          
-          # Copy framework to ios/ directory
           cp -R artifacts/ios/LiveKitC2CCall.framework ios/
           
-          # Clean CI-only files from the package
           rm -rf ci-stubs .github
           rm -f android/build.gradle android/settings.gradle android/proguard-rules.pro
           rm -rf android/gradle android/src
@@ -220,7 +216,6 @@ jobs:
           rm -rf ios/Classes ios/Info.plist
           rm -rf artifacts
           
-          # Create final plugin ZIP (must include top-level folder name)
           cd ..
           zip -r LiveKit-C2CCall-v1.0.0.zip LiveKit-C2CCall/ \
             -x "LiveKit-C2CCall/DEVELOPMENT.md"

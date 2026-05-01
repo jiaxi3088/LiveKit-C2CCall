@@ -2,6 +2,19 @@
 
 > 基于 LiveKit SDK 实现 1v1 视频通话，支持 Android + iOS 双端，含无障碍支持。
 
+## 〇、更新代码后推送到 GitHub
+
+修改插件源码后，执行以下命令推送到 GitHub，会自动触发云端编译：
+
+```bash
+cd d:\phpstudy_pro\WWW\live-kit\LiveKit-C2CCall
+git add .
+git commit -m "fix: 修改说明"
+git push origin main
+```
+
+推送后前往 [GitHub Actions](https://github.com/jiaxi3088/LiveKit-C2CCall/actions) 页面查看编译状态，编译完成后下载最新的 `livekit-c2c-plugin` 产物即可。
+
 ## 一、插件信息
 
 | 项目 | 值 |
@@ -10,34 +23,63 @@
 | 版本 | 1.0.0 |
 | 平台 | Android (minSdk 24) + iOS 14.0+ |
 | 依赖 | LiveKit Android SDK 2.0.0 / LiveKitClient Swift ~1.8.0 |
+| 构建 | GitHub Actions 自动编译（无需本地 Android Studio / Xcode） |
 
 ---
 
 ## 二、安装步骤
 
-### 2.1 HBuilderX 导入
+### 2.1 获取插件包
 
-1. 打开 **HBuilderX** → 项目根目录 `nativeplugins/` 下创建 `LiveKit-C2CCall/`
-2. 将本插件整个目录复制到该路径下：
-   ```
-   nativeplugins/LiveKit-C2CCall/
-   ├── package.json
-   ├── android/
-   │   └── livekit-c2c.aar
-   ├── ios/
-   │   └── LiveKitC2CCall.framework
-   └── doc.md
-   ```
+插件通过 GitHub Actions 自动编译生成。方式有两种：
 
-### 2.2 manifest.json 配置
+**方式 A（推荐）**：直接下载编译好的 ZIP 包
 
-在 **manifest.json → App原生插件配置** 中勾选 `LiveKit-C2CCall`。
+1. 打开 GitHub 仓库 **Actions** 页面
+2. 找到最新的成功编译记录
+3. 下载 **Artifacts** 中的 `livekit-c2c-plugin.zip`
 
-Android 权限会自动添加，iOS 权限已在 Info.plist 中声明。
+**方式 B**：自行 clone 源码编译
 
-### 2.3 云打包
+```bash
+git clone https://github.com/你的用户名/LiveKit-C2CCall.git
+# 推送到你自己的 GitHub，Actions 会自动编译
+```
+
+详细编译流程参见 `DEVELOPMENT.md`。
+
+### 2.2 放入 UniApp 项目
+
+解压 `livekit-c2c-plugin.zip`，将整个 `LiveKit-C2CCall` 文件夹复制到项目的 `nativeplugins/` 下：
+
+```
+你的UniApp项目/
+├── pages/
+├── manifest.json
+└── nativeplugins/
+    └── LiveKit-C2CCall/
+        ├── package.json                  ← DCloud 插件描述文件
+        ├── android/
+        │   └── livekit-c2c.aar           ← Android 编译产物
+        └── ios/
+            └── LiveKitC2CCall.framework   ← iOS 编译产物
+```
+
+> **注意**：`android` 和 `ios` 目录名必须全小写，否则云端打包会失败。
+
+### 2.3 manifest.json 配置
+
+打开 `manifest.json` → **App原生插件配置** → 勾选 `LiveKit-C2CCall`。
+
+Android 权限会在云端打包时自动添加，iOS 权限已通过 `package.json` 的 `plists` 字段配置。
+
+### 2.4 云打包
 
 使用 HBuilderX **云打包**（自定义基座或正式包），本地标准运行不支持原生插件。
+
+```
+HBuilderX 菜单：发行 → 原生 App-云打包 → 选择平台 → 使用公共测试证书 → 打包
+```
 
 ---
 
@@ -105,22 +147,21 @@ LiveKitC2CCall.answerC2CVideoCall({
 ### 3.4 hangupCall - 挂断
 
 ```javascript
-// 无参调用，挂断当前通话
 LiveKitC2CCall.hangupCall();
 ```
 
 ### 3.5 enableVideo - 开关摄像头
 
 ```javascript
-LiveKitC2CCall.enableVideo(true);   // 开启摄像头（默认）
-LiveKitC2CCall.enableVideo(false);  // 关闭摄像头
+LiveKitC2CCall.enableVideo(true);   // 开启（默认）
+LiveKitC2CCall.enableVideo(false);  // 关闭
 ```
 
 ### 3.6 enableAudio - 开关麦克风
 
 ```javascript
-LiveKitC2CCall.enableAudio(true);   // 开启麦克风（默认）
-LiveKitC2CCall.enableAudio(false);  // 关闭麦克风
+LiveKitC2CCall.enableAudio(true);   // 开启（默认）
+LiveKitC2CCall.enableAudio(false);  // 关闭
 ```
 
 ### 3.7 switchCamera - 切换前后置摄像头
@@ -140,31 +181,31 @@ LiveKitC2CCall.onCallEvent((res) => {
 
   switch (event) {
     case "onConnected":
-      console.log("✅ 通话已接通");
+      console.log("通话已接通");
       break;
     case "onDisconnected":
-      console.log("🔌 通话断开:", msg);
+      console.log("通话断开:", msg);
       break;
     case "onHangup":
-      console.log("📞 已挂断");
+      console.log("已挂断");
       break;
     case "onRemoteHangup":
-      console.log("❗ 对方已挂断");
+      console.log("对方已挂断");
       break;
     case "onRemoteCameraOn":
-      console.log("📹 对方开启了摄像头");
+      console.log("对方开启了摄像头");
       break;
     case "onRemoteCameraOff":
-      console.log("⬛ 对方关闭了摄像头");
+      console.log("对方关闭了摄像头");
       break;
     case "onRemoteAudioOn":
-      console.log("🎤 对方开启了麦克风");
+      console.log("对方开启了麦克风");
       break;
     case "onRemoteAudioOff":
-      console.log("🔇 对方关闭了麦克风");
+      console.log("对方关闭了麦克风");
       break;
     case "onError":
-      console.error("❌ 异常:", msg);
+      console.error("异常:", msg);
       break;
   }
 });
@@ -216,13 +257,10 @@ LiveKitC2CCall.onCallEvent((res) => {
 ```javascript
 <template>
   <view class="call-container">
-    <!-- 远端画面 -->
     <view class="remote-view">
       <text>{{ remoteStatus }}</text>
     </view>
-    <!-- 本地画面 -->
     <view class="local-view"></view>
-    <!-- 操作按钮 -->
     <view class="controls">
       <button @click="toggleVideo">{{ isVideoOn ? '关闭摄像头' : '打开摄像头' }}</button>
       <button @click="toggleAudio" style="background:#f00;color:#fff;">{{ isAudioOn ? '静音' : '取消静音' }}</button>
@@ -240,6 +278,7 @@ export default {
     return {
       isVideoOn: true,
       isAudioOn: true,
+      isFront: true,
       remoteStatus: '等待连接...'
     };
   },
@@ -288,8 +327,8 @@ export default {
     },
 
     switchCam() {
-      CallPlugin.switchCamera(this.isFront ? 'back' : 'front');
       this.isFront = !this.isFront;
+      CallPlugin.switchCamera(this.isFront ? 'front' : 'back');
     },
 
     hangup() {
@@ -318,7 +357,6 @@ export default {
 
 ### Android 无障碍
 
-- 所有按钮设置 `contentDescription` 属性
 - 通话状态变化通过 `AccessibilityManager` 自动朗读：
   - 摄像头开关 → "摄像头已开启/已关闭"
   - 麦克风开关 → "麦克风已开启/已关闭"
@@ -327,8 +365,6 @@ export default {
 
 ### iOS 无障碍
 
-- 所有控件设置 `accessibilityLabel`
-- `isAccessibilityElement = true` 确保可被读屏识别
 - 通过 `UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification)` 触发系统朗读
 - 支持 VoiceOver 实时朗读通话状态变化
 
@@ -340,53 +376,34 @@ export default {
 
 | 权限 | 用途 |
 |------|------|
-| `CAMERA` | 访问摄像头进行视频采集 |
+| `CAMERA` | 视频采集 |
 | `RECORD_AUDIO` | 麦克风录音 |
 | `INTERNET` | WebSocket 连接 LiveKit 服务 |
 | `ACCESS_NETWORK_STATE` | 检测网络状态 |
 | `MODIFY_AUDIO_SETTINGS` | 音频路由切换 |
 
-### iOS（Info.plist）
+### iOS（自动配置）
 
 | Key | Value |
 |-----|-------|
 | `NSCameraUsageDescription` | 需要摄像头权限进行视频通话 |
 | `NSMicrophoneUsageDescription` | 需要麦克风权限进行语音通话 |
+| `UIBackgroundModes` | audio, voip |
 
-后台模式：`audio` + `voip`
-
----
-
-## 八、构建说明
-
-### Android 构建
-
-```bash
-cd android
-./gradlew assembleRelease
-# 输出：build/outputs/aar/livekit-c2c-release.aar → 重命名为 livekit-c2c.aar
-```
-
-### iOS 构建
-
-```bash
-cd ios
-pod install
-xcodebuild -workspace LiveKitC2CCall.xcworkspace \
-           -scheme LiveKitC2CCall \
-           -configuration Release \
-           -sdk iphoneos \
-           -derivedBuildPath build \
-           build
-```
+权限通过 `package.json` 的 `plists` 字段自动注入，无需手动配置。
 
 ---
 
-## 九、注意事项
+## 八、注意事项
 
-1. **Token 获取**: `token` 字段需要从你的服务端获取，服务端需集成 LiveKit Server SDK 生成 JWT Token
-2. **wss 协议**: 必须使用 `wss://` 安全连接
-3. **线程安全**: UI 相关方法标记为 uiThread=true，非 UI 方法为 false
-4. **生命周期**: 在页面 `onUnload` 时务必调用 `hangupCall()` 释放资源
-5. **事件监听顺序**: `onCallEvent` 应在 `startC2CVideoCall` / `answerC2CVideoCall` 之前注册
-6. **云打包**: 本地标准运行不支持原生插件，必须使用自定义基座或云打包
+1. **Token 获取**：`token` 字段需从服务端获取，服务端需集成 LiveKit Server SDK 生成 JWT Token
+2. **wss 协议**：必须使用 `wss://` 安全连接
+3. **生命周期**：在页面 `onUnload` 时务必调用 `hangupCall()` 释放资源
+4. **事件监听顺序**：`onCallEvent` 应在 `startC2CVideoCall` / `answerC2CVideoCall` 之前注册
+5. **云打包**：本地标准运行不支持原生插件，必须使用自定义基座或云打包
+6. **目录命名**：插件包中 `android` 和 `ios` 目录必须全小写
+7. **更新插件**：修改源码后 push 到 GitHub，Actions 会自动编译新版本，下载后替换项目中的插件文件夹即可
+
+---
+
+*最后更新时间：2026-05-01*
