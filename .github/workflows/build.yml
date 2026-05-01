@@ -67,7 +67,8 @@ jobs:
       - name: Build Android AAR
         working-directory: android
         run: |
-          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
           echo "=== Build output ==="
           ls -la build/outputs/aar/ 2>/dev/null || { echo "ERROR: No AAR output directory found!"; exit 1; }
           if [ ! -f build/outputs/aar/*-release.aar ]; then

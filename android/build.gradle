@@ -1,11 +1,11 @@
 plugins {
-    id 'com.android.library' version '8.8.2'
+    id 'com.android.library' version '8.7.4'
     id 'org.jetbrains.kotlin.android' version '2.0.21'
 }
 
 android {
     namespace "com.livekit.c2ccall"
-    compileSdk 34
+    compileSdk 35
 
     defaultConfig {
         minSdk 24
@@ -29,7 +29,6 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    // LiveKit SDK 是 Kotlin 编写的，需要启用 Kotlin 支持
     kotlinOptions {
         jvmTarget = '17'
     }
@@ -47,15 +46,15 @@ android {
 }
 
 dependencies {
-    // LiveKit Android SDK（核心依赖）
-    implementation 'io.livekit:livekit-android-sdk:2.0.0'
+    // LiveKit Android SDK（核心依赖）- 最新版 2.25.1
+    implementation 'io.livekit:livekit-android:2.25.1'
 
     // AndroidX（LiveKit SDK 依赖）
     implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.core:core-ktx:1.12.0'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
-    implementation 'androidx.lifecycle:lifecycle-common:2.7.0'
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
+    implementation 'androidx.lifecycle:lifecycle-common:2.8.7'
 
-    // uni-app SDK（编译时由 HBuilderX 提供，此处仅做类型引用）
+    // uni-app SDK（编译时由 HBuilderX 提供）
     compileOnly fileTree(dir: '../libs', include: ['uniapp-v8-release.aar'])
 }
