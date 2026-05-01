@@ -366,9 +366,34 @@ jobs:
           ls -la LiveKit-C2CCall-v1.0.0.zip
           unzip -l LiveKit-C2CCall-v1.0.0.zip | head -30
 
-      - name: Upload plugin ZIP
+      - name: Upload plugin ZIP (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: livekit-c2c-plugin
           path: LiveKit-C2CCall-v1.0.0.zip
           if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: LiveKit-C2CCall v1.0.0
+          body: |
+            ## uni-app 原生插件自动构建产物
+
+            **构建时间**: ${{ github.run_started_at }}
+            **Commit**: ${{ github.sha }}
+            **触发**: ${{ github.event_name }}
+
+            ### 下载说明
+
+            | 文件 | 说明 |
+            |------|------|
+            `LiveKit-C2CCall-v1.0.0.zip` | 完整插件包（含 Android + iOS），解压后放入 UniApp 项目 `nativeplugins/` 目录即可 |
+
+            > 解压后目录结构：`LiveKit-C2CCall/android/livekit-c2c.aar` + `LiveKit-C2CCall/ios/LiveKitC2CCall.framework`
+          files: LiveKit-C2CCall-v1.0.0.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

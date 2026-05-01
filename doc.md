@@ -7,13 +7,17 @@
 修改插件源码后，执行以下命令推送到 GitHub，会自动触发云端编译：
 
 ```bash
-cd d:\phpstudy_pro\WWW\live-kit\LiveKit-C2CCall
+cd d:\phpstudy_pro\WWW\gitHub推送编译\LiveKit-C2CCall
 git add .
 git commit -m "fix: 修改说明"
 git push origin main
 ```
 
-推送后前往 [GitHub Actions](https://github.com/jiaxi3088/LiveKit-C2CCall/actions) 页面查看编译状态，编译完成后下载最新的 `livekit-c2c-plugin` 产物即可。
+推送后前往 [GitHub Actions](https://github.com/jiaxi3088/LiveKit-C2CCall/actions) 页面查看编译状态。
+
+**编译完成后，产物会自动发布到 [Releases](https://github.com/jiaxi3088/LiveKit-C2CCall/releases) 页面，直接下载 `LiveKit-C2CCall-v1.0.0.zip` 即可。**
+
+> 同时 Actions 的 Artifacts 中也会保留 3 个临时包（`android-aar`、`ios-framework`、`livekit-c2c-plugin`），有效期 1 天。
 
 ## 一、插件信息
 
@@ -33,13 +37,18 @@ git push origin main
 
 插件通过 GitHub Actions 自动编译生成。方式有两种：
 
-**方式 A（推荐）**：直接下载编译好的 ZIP 包
+**方式 A（推荐）**：从 Releases 页面下载
 
-1. 打开 GitHub 仓库 **Actions** 页面
-2. 找到最新的成功编译记录
-3. 下载 **Artifacts** 中的 `livekit-c2c-plugin.zip`
+1. 打开仓库 **Releases** 页面：https://github.com/jiaxi3088/LiveKit-C2CCall/releases
+2. 下载最新版本的 **`LiveKit-C2CCall-v1.0.0.zip`**（含 Android + iOS 双端产物）
 
-**方式 B**：自行 clone 源码编译
+**方式 B**：从 Actions Artifacts 下载
+
+1. 打开 [GitHub Actions](https://github.com/jiaxi3088/LiveKit-C2CCall/actions) 页面
+2. 找到最新的成功编译记录（绿色 ✓）
+3. 在 **Artifacts** 中下载 `livekit-c2c-plugin`（有效期 1 天）
+
+**方式 C**：自行 clone 源码编译
 
 ```bash
 git clone https://github.com/你的用户名/LiveKit-C2CCall.git
@@ -406,4 +415,4 @@ export default {
 
 ---
 
-*最后更新时间：2026-05-01*
+*最后更新时间：2026-05-01（已验证 GitHub Actions 编译产物）*
