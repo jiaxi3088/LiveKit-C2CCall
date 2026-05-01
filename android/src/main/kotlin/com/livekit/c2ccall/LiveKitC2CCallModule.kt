@@ -261,7 +261,7 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun observeRemoteParticipant(remote: RemoteParticipant) {
         scope.launch {
-            remote.events.collectLatest { event ->
+            remote.events.collectLatest { event: ParticipantEvent ->
                 when (event) {
                     is ParticipantEvent.TrackPublished -> {
                         when (event.publication.kind) {
