@@ -78,12 +78,27 @@ jobs:
           echo "AAR file(s):"
           ls -la build/outputs/aar/*-release.aar
 
+      - name: Verify AAR output
+        run: |
+          echo "=== Final AAR verification ==="
+          echo "Files matching pattern:"
+          ls -la android/build/outputs/aar/*-release.aar 2>&1 || true
+          echo "File sizes:"
+          du -h android/build/outputs/aar/*-release.aar 2>&1 || true
+          echo "AAR contents (brief):"
+          unzip -l android/build/outputs/aar/*-release.aar 2>&1 | head -20 || true
+
       - name: Upload Android AAR
         uses: actions/upload-artifact@v4
         with:
           name: android-aar
           path: android/build/outputs/aar/*-release.aar
           if-no-files-found: error
+          retention-days: 1
+
+      - name: Confirm upload
+        if: always()
+        run: echo "Android AAR upload step completed (check above for errors)"
 
   build-ios:
     runs-on: macos-latest
@@ -194,11 +209,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug: list available artifacts
+        run: |
+          echo "=== Listing all workflow artifacts ==="
+          # Use GitHub CLI to list artifacts if available
+          gh run view ${{ github.run_id }} --log-failed 2>/dev/null || echo "gh not available or no failed logs"
+          echo "Workflow run ID: ${{ github.run_id }}"
+          echo "Attempting download from dependent jobs..."
+
       - name: Download Android AAR
         uses: actions/download-artifact@v4
+        continue-on-error: false
         with:
           name: android-aar
           path: artifacts/android/
+
+      - name: Verify Android AAR download
+        run: |
+          echo "=== Checking downloaded AAR ==="
+          ls -laR artifacts/android/
+          if [ ! -f "artifacts/android/*-release.aar" ] && [ -z "$(ls -A artifacts/android/ 2>/dev/null)" ]; then
+            echo "ERROR: Android AAR directory is empty or files missing!"
+            exit 1
+          fi
+          echo "Download verification passed"
 
       - name: Download iOS Framework
         uses: actions/download-artifact@v4
