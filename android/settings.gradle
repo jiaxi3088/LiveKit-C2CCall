@@ -15,5 +15,3 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "livekit-c2ccall"
-include ':livekit-c2ccall'
-project(':livekit-c2ccall').projectDir = new File(rootDir, '.')
