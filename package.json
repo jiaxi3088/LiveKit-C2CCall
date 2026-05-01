@@ -19,6 +19,7 @@
                 "arm64-v8a"
             ],
             "minSdkVersion": "24",
+            "dependencies": [],
             "permissions": [
                 "android.permission.CAMERA",
                 "android.permission.RECORD_AUDIO",
@@ -26,9 +27,6 @@
                 "android.permission.ACCESS_NETWORK_STATE",
                 "android.permission.MODIFY_AUDIO_SETTINGS"
             ],
-            "dependencies": [
-                "io.livekit:livekit-android-sdk:2.0.0"
-            ]
         },
         "ios": {
             "plugins": [
