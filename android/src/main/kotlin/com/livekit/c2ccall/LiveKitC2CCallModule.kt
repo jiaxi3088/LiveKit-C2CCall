@@ -11,7 +11,6 @@ import io.dcloud.feature.uniapp.common.UniModule
 import io.livekit.android.LiveKit
 import io.livekit.android.events.ParticipantEvent
 import io.livekit.android.events.RoomEvent
-import io.livekit.android.options.ConnectOptions
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
@@ -21,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /**
@@ -83,9 +83,8 @@ class LiveKitC2CCallModule : UniModule() {
                     handleRoomEvent(event)
                 }
 
-                // 连接到房间
-                val connectOptions = ConnectOptions()
-                room!!.connect(wsURL, token, connectOptions)
+                // 连接到房间（LiveKit 2.x 简化 API）
+                room!!.connect(wsURL, token)
 
                 invokeSuccess(callback, "呼叫已发起")
                 announceForAccessibility("正在发起视频通话")
@@ -137,8 +136,7 @@ class LiveKitC2CCallModule : UniModule() {
                     handleRoomEvent(event)
                 }
 
-                val connectOptions = ConnectOptions()
-                room!!.connect(wsURL, token, connectOptions)
+                room!!.connect(wsURL, token)
 
                 invokeSuccess(callback, "已接听来电")
                 announceForAccessibility("正在接听来电")
