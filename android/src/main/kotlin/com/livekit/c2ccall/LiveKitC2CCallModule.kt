@@ -9,18 +9,16 @@ import io.dcloud.feature.uniapp.annotation.UniJSMethod
 import io.dcloud.feature.uniapp.bridge.UniJSCallback
 import io.dcloud.feature.uniapp.common.UniModule
 import io.livekit.android.LiveKit
-import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.ParticipantEvent
-import io.livekit.android.options.AudioTrackPublishOptions
+import io.livekit.android.events.RoomEvent
 import io.livekit.android.options.CameraCaptureOptions
 import io.livekit.android.options.ConnectOptions
-import io.livekit.android.options.RoomOptions
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
 import io.livekit.android.room.track.CameraPosition
+import io.livekit.android.room.track.Track.Kind as TrackKind
 import io.livekit.android.room.track.VideoPreset
-import io.livekit.android.room.track.TrackPublication
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,8 +66,7 @@ class LiveKitC2CCallModule : UniModule() {
         val audioOpts = options["audioOptions"] as? Map<String, Any>
         val callRing = options["callRing"] as? String
 
-        val captureOptions = parseCameraCaptureOptions(videoOpts)
-        val audioPublishOptions = parseAudioPublishOptions(audioOpts)
+        parseAudioPublishOptions(audioOpts)
 
         // 播放呼叫铃声
         playRing(callRing)
@@ -78,7 +75,7 @@ class LiveKitC2CCallModule : UniModule() {
             try {
                 disconnectRoom()
 
-                val appContext = mUniSDKInstance?.context?.applicationContext
+                val appContext = mUniSDKInstance?.context()?.applicationContext
                     ?: throw Exception("无法获取 Context")
 
                 room = LiveKit.create(appContext)
@@ -89,9 +86,7 @@ class LiveKitC2CCallModule : UniModule() {
                 }
 
                 // 连接到房间
-                val connectOptions = ConnectOptions(
-                    audioPublishOptions = audioPublishOptions
-                )
+                val connectOptions = ConnectOptions()
                 room!!.connect(wsURL, token, connectOptions)
 
                 invokeSuccess(callback, "呼叫已发起")
@@ -126,8 +121,7 @@ class LiveKitC2CCallModule : UniModule() {
         val audioOpts = options["audioOptions"] as? Map<String, Any>
         val answerRing = options["answerRing"] as? String
 
-        val captureOptions = parseCameraCaptureOptions(videoOpts)
-        val audioPublishOptions = parseAudioPublishOptions(audioOpts)
+        parseAudioPublishOptions(audioOpts)
 
         // 播放接听铃声
         playRing(answerRing)
@@ -136,7 +130,7 @@ class LiveKitC2CCallModule : UniModule() {
             try {
                 disconnectRoom()
 
-                val appContext = mUniSDKInstance?.context?.applicationContext
+                val appContext = mUniSDKInstance?.context()?.applicationContext
                     ?: throw Exception("无法获取 Context")
 
                 room = LiveKit.create(appContext)
@@ -145,9 +139,7 @@ class LiveKitC2CCallModule : UniModule() {
                     handleRoomEvent(event)
                 }
 
-                val connectOptions = ConnectOptions(
-                    audioPublishOptions = audioPublishOptions
-                )
+                val connectOptions = ConnectOptions()
                 room!!.connect(wsURL, token, connectOptions)
 
                 invokeSuccess(callback, "已接听来电")
@@ -282,11 +274,11 @@ class LiveKitC2CCallModule : UniModule() {
                 when (event) {
                     is ParticipantEvent.TrackPublished -> {
                         when (event.publication.kind) {
-                            io.livekit.android.room.track.Track.Kind.VIDEO -> {
+                            TrackKind.VIDEO -> {
                                 sendEvent("onRemoteCameraOn", "对方已开启摄像头")
                                 announceForAccessibility("对方已开启摄像头")
                             }
-                            io.livekit.android.room.track.Track.Kind.AUDIO -> {
+                            TrackKind.AUDIO -> {
                                 sendEvent("onRemoteAudioOn", "对方已开启麦克风")
                                 announceForAccessibility("对方已开启麦克风")
                             }
@@ -295,11 +287,11 @@ class LiveKitC2CCallModule : UniModule() {
                     }
                     is ParticipantEvent.TrackUnpublished -> {
                         when (event.publication.kind) {
-                            io.livekit.android.room.track.Track.Kind.VIDEO -> {
+                            TrackKind.VIDEO -> {
                                 sendEvent("onRemoteCameraOff", "对方已关闭摄像头")
                                 announceForAccessibility("对方已关闭摄像头")
                             }
-                            io.livekit.android.room.track.Track.Kind.AUDIO -> {
+                            TrackKind.AUDIO -> {
                                 sendEvent("onRemoteAudioOff", "对方已关闭麦克风")
                                 announceForAccessibility("对方已关闭麦克风")
                             }
@@ -308,10 +300,10 @@ class LiveKitC2CCallModule : UniModule() {
                     }
                     is ParticipantEvent.TrackMuted -> {
                         when (event.publication.kind) {
-                            io.livekit.android.room.track.Track.Kind.VIDEO -> {
+                            TrackKind.VIDEO -> {
                                 sendEvent("onRemoteCameraOff", "对方已关闭摄像头")
                             }
-                            io.livekit.android.room.track.Track.Kind.AUDIO -> {
+                            TrackKind.AUDIO -> {
                                 sendEvent("onRemoteAudioOff", "对方已关闭麦克风")
                             }
                             else -> {}
@@ -319,10 +311,10 @@ class LiveKitC2CCallModule : UniModule() {
                     }
                     is ParticipantEvent.TrackUnmuted -> {
                         when (event.publication.kind) {
-                            io.livekit.android.room.track.Track.Kind.VIDEO -> {
+                            TrackKind.VIDEO -> {
                                 sendEvent("onRemoteCameraOn", "对方已开启摄像头")
                             }
-                            io.livekit.android.room.track.Track.Kind.AUDIO -> {
+                            TrackKind.AUDIO -> {
                                 sendEvent("onRemoteAudioOn", "对方已开启麦克风")
                             }
                             else -> {}
@@ -371,12 +363,11 @@ class LiveKitC2CCallModule : UniModule() {
     }
 
     /**
-     * 解析音频发布配置
+     * 解析音频发布配置（LiveKit SDK 2.x 音频选项由内部自动管理）
      */
-    private fun parseAudioPublishOptions(audioOpts: Map<String, Any>?): AudioTrackPublishOptions {
-        return AudioTrackPublishOptions()
-        // LiveKit Android SDK 2.0 的 AudioTrackPublishOptions 通过 Room 选项配置
-        // 音频处理（降噪、回声消除等）由 SDK 内部自动管理
+    private fun parseAudioPublishOptions(audioOpts: Map<String, Any>?): Unit {
+        // LiveKit Android SDK 2.x 的音频处理（降噪、回声消除等）由 SDK 内部自动管理
+        // 如需自定义音频参数，后续可通过 RoomOptions 配置
     }
 
     /**
@@ -387,7 +378,7 @@ class LiveKitC2CCallModule : UniModule() {
         if (ringPath.isNullOrEmpty()) return
 
         try {
-            val context = mUniSDKInstance?.context ?: return
+            val context = mUniSDKInstance?.context() ?: return
             ringPlayer = MediaPlayer().apply {
                 setDataSource(context, android.net.Uri.parse(ringPath))
                 isLooping = true
@@ -440,7 +431,7 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun announceForAccessibility(message: String) {
         try {
-            val context = mUniSDKInstance?.context ?: return
+            val context = mUniSDKInstance?.context() ?: return
             val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager ?: return
             if (am.isEnabled) {
                 val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_ANNOUNCEMENT)
