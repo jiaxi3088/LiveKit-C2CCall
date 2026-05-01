@@ -5,4 +5,7 @@ public abstract class UniModule {
 
     public void destroy() {
     }
+
+    public void onActivityDestroy() {
+    }
 }
