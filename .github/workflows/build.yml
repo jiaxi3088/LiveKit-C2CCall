@@ -350,22 +350,25 @@ jobs:
           mkdir -p android ios
           cp artifacts/android/*-release.aar android/livekit-c2c.aar
           cp -R artifacts/ios/LiveKitC2CCall.framework ios/
-          
+
           rm -rf ci-stubs .github
           rm -f android/build.gradle android/settings.gradle android/proguard-rules.pro
           rm -rf android/gradle android/src
           rm -f ios/Podfile ios/LiveKitC2CCall.podspec ios/project.yml
           rm -rf ios/Classes ios/Info.plist
           rm -rf artifacts
-          
-          cd ..
-          zip -r LiveKit-C2CCall-v1.0.0.zip LiveKit-C2CCall/ \
-            -x "LiveKit-C2CCall/DEVELOPMENT.md"
-          mv LiveKit-C2CCall-v1.0.0.zip LiveKit-C2CCall/
+
+          # 在 GITHUB_WORKSPACE 内直接打包，避免 cd .. 导致路径混乱
+          zip -r LiveKit-C2CCall-v1.0.0.zip ./ \
+            -x "DEVELOPMENT.md" ".git/*"
+
+          echo "=== ZIP created ==="
+          ls -la LiveKit-C2CCall-v1.0.0.zip
+          unzip -l LiveKit-C2CCall-v1.0.0.zip | head -30
 
       - name: Upload plugin ZIP
         uses: actions/upload-artifact@v4
         with:
           name: livekit-c2c-plugin
-          path: LiveKit-C2CCall/LiveKit-C2CCall-v1.0.0.zip
+          path: LiveKit-C2CCall-v1.0.0.zip
           if-no-files-found: error
