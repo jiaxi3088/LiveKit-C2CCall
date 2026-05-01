@@ -12,15 +12,12 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0.0"
-
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        consumerProguardFiles "consumer-rules.pro"
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
         }
     }
 
@@ -33,28 +30,126 @@ android {
         jvmTarget = '17'
     }
 
-    packagingOptions {
-        pickFirst '**/libc++_shared.so'
-        pickFirst '**/libjsc.so'
-        pickFirst '**/libwebrtc.so'
-        merge '**/META-INF/*.pro'
+    packaging {
+        jniLibs {
+            pickFirsts += ['**/libc++_shared.so', '**/libjsc.so', '**/libwebrtc.so']
+        }
+        resources {
+            merges += ['**/META-INF/*.pro']
+        }
     }
+}
 
-    lintOptions {
-        abortOnError false
-    }
+// ========== Fat AAR 构建：将所有依赖打入最终 AAR ==========
+configurations {
+    // 收集需要打包进 AAR 的运行时依赖
+    fatAarImplementation
+}
+afterEvaluate {
+    configurations.implementation.extendsFrom(configurations.fatAarImplementation)
 }
 
 dependencies {
-    // LiveKit Android SDK（核心依赖）- 最新版 2.25.1
-    implementation 'io.livekit:livekit-android:2.25.1'
+    // LiveKit Android SDK - 用 fatAarImplementation 确保打包进 AAR
+    fatAarImplementation 'io.livekit:livekit-android:2.25.1'
 
-    // AndroidX（LiveKit SDK 依赖）
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.core:core-ktx:1.13.1'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
-    implementation 'androidx.lifecycle:lifecycle-common:2.8.7'
+    // AndroidX（LiveKit SDK 的传递依赖，也需打包）
+    fatAarImplementation 'androidx.appcompat:appcompat:1.6.1'
+    fatAarImplementation 'androidx.core:core-ktx:1.13.1'
+    fatAarImplementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
+    fatAarImplementation 'androidx.lifecycle:lifecycle-common:2.8.7'
 
-    // uni-app SDK（编译时由 HBuilderX 提供）
+    // uni-app SDK（仅编译用，不打包）
     compileOnly fileTree(dir: '../libs', include: ['uniapp-v8-release.aar'])
 }
+
+tasks.register('embedDependencies') {
+    dependsOn tasks.matching { it.name == 'assembleRelease' }
+    group = 'build'
+    description = 'Embed all runtime dependencies into the release AAR'
+
+    doLast {
+        def outputDir = file("${buildDir}/outputs/aar")
+        def aarFile = outputDir.listFiles()?.find { it.name.endsWith('-release.aar') }
+        if (!aarFile) {
+            throw new GradleException("Release AAR not found in ${outputDir}")
+        }
+
+        def stagingDir = file("${buildDir}/fat-aar-staging")
+        stagingDir.deleteDir()
+        stagingDir.mkdirs()
+
+        println "=== Embedding dependencies into ${aarFile.name} ==="
+
+        // 解压原 AAR
+        copy {
+            from zipTree(aarFile)
+            into stagingDir
+        }
+
+        // 将所有 fatAarImplementation 依赖嵌入 classes.jar
+        def embeddedJars = []
+        configurations.fatAarImplementation.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+            if (artifact.file?.name?.endsWith('.jar') || artifact.file?.name?.endsWith('.aar')) {
+                embeddedJars.add(artifact.file)
+                println "  + ${artifact.file.name} (${artifact.file.size()} bytes)"
+            }
+        }
+
+        if (embeddedJars.isEmpty()) {
+            println "  WARNING: No dependencies found to embed"
+        } else {
+            // 合并 classes.jar
+            def mergedJar = file("${stagingDir}/classes-merged.jar")
+            ant.jar(destfile: mergedJar) {
+                // 原有 classes.jar 内容
+                zipfileset(src: "${stagingDir}/classes.jar")
+                // 所有依赖的 jar/aar 内容
+                embeddedJars.each { dep ->
+                    if (dep.name.endsWith('.aar')) {
+                        // AAR → 提取里面的 classes.jar
+                        def aarStaging = file("${buildDir}/aar-extract-${dep.name}")
+                        aarStaging.deleteDir()
+                        copy { from zipTree(dep); into aarStaging }
+                        zipfileset(src: "${aarStaging}/classes.jar")
+                    } else {
+                        zipfileset(src: dep)
+                    }
+                }
+            }
+            ant.move(file: "${stagingDir}/classes.jar", tofile: "${stagingDir}/classes-old.jar", failonerror: false)
+            ant.move(file: mergedJar, tofile: "${stagingDir}/classes.jar")
+
+            // 嵌入 JNI .so 库（如果有）
+            embeddedJars.each { dep ->
+                if (dep.name.endsWith('.aar')) {
+                    def aarStaging = file("${buildDir}/aar-jni-${dep.name}")
+                    aarStaging.deleteDir()
+                    copy { from zipTree(dep); into aarStaging }
+                    def jniDir = file("${aarStaging}/jni")
+                    if (jniDir.exists()) {
+                        copy {
+                            from jniDir
+                            into "${stagingDir}/jni"
+                        }
+                        println "  + Embedded JNI libs from ${dep.name}"
+                    }
+                }
+            }
+        }
+
+        // 重新打包 AAR
+        ant.zip(destfile: aarFile) {
+            fileset(dir: stagingDir) {
+                exclude(name: 'classes-old.jar')
+            }
+        }
+
+        def newSize = aarFile.length()
+        println "=== Fat AAR created: ${aarFile.name} (${newSize} bytes / ${(newSize / 1024).round()} KB) ==="
+        println "Embedded ${embeddedJars.size()} dependencies"
+        stagingDir.deleteDir()
+    }
+}
+
+tasks.named('assembleRelease').configure { finalizedBy 'embedDependencies' }
