@@ -18,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /**
@@ -78,9 +79,9 @@ class LiveKitC2CCallModule : UniModule() {
 
                 room = LiveKit.create(appContext)
 
-                // 在单独协程中收集房间事件（EventListenable.collect() 返回 Nothing，会一直运行）
+                // 在单独协程中收集房间事件（通过 EventListenable.events 获取 SharedFlow，使用标准 Flow.collect）
                 scope.launch {
-                    room?.events?.collect { event: RoomEvent ->
+                    room!!.events.events.collect { event: RoomEvent ->
                         handleRoomEvent(event)
                     }
                 }
@@ -139,7 +140,7 @@ class LiveKitC2CCallModule : UniModule() {
 
                 // 在单独协程中收集房间事件
                 scope.launch {
-                    room?.events?.collect { event: RoomEvent ->
+                    room!!.events.events.collect { event: RoomEvent ->
                         handleRoomEvent(event)
                     }
                 }
@@ -272,7 +273,7 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun observeRemoteParticipant(remote: RemoteParticipant) {
         scope.launch {
-            remote.events?.collect { event: ParticipantEvent ->
+            remote.events.events.collect { event: ParticipantEvent ->
                 when (event) {
                     is ParticipantEvent.TrackPublished -> {
                         when (event.publication.kind) {
