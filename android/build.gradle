@@ -64,7 +64,6 @@ dependencies {
 }
 
 tasks.register('embedDependencies') {
-    dependsOn tasks.matching { it.name == 'assembleRelease' }
     group = 'build'
     description = 'Embed all runtime dependencies into the release AAR'
 
@@ -152,4 +151,6 @@ tasks.register('embedDependencies') {
     }
 }
 
-tasks.named('assembleRelease').configure { finalizedBy 'embedDependencies' }
+afterEvaluate {
+    tasks.named('assembleRelease').configure { finalizedBy 'embedDependencies' }
+}
