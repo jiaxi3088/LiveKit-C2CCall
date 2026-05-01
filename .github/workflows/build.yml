@@ -69,14 +69,21 @@ jobs:
         run: |
           gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
           echo "=== Build output ==="
-          ls -la build/outputs/aar/ 2>/dev/null || echo "No AAR output found"
+          ls -la build/outputs/aar/ 2>/dev/null || { echo "ERROR: No AAR output directory found!"; exit 1; }
+          if [ ! -f build/outputs/aar/*-release.aar ]; then
+            echo "=== BUILD FAILED - No AAR found ==="
+            tail -80 build.log
+            exit 1
+          fi
+          echo "AAR file(s):"
+          ls -la build/outputs/aar/*-release.aar
 
       - name: Upload Android AAR
         uses: actions/upload-artifact@v4
         with:
           name: android-aar
           path: android/build/outputs/aar/*-release.aar
-          if-no-files-found: warn
+          if-no-files-found: error
 
   build-ios:
     runs-on: macos-latest
@@ -179,7 +186,7 @@ jobs:
         with:
           name: ios-framework
           path: ios/build/LiveKitC2CCall.framework
-          if-no-files-found: warn
+          if-no-files-found: error
 
   package:
     needs: [build-android, build-ios]
