@@ -1,0 +1,72 @@
+{
+    "name": "LiveKit-C2CCall",
+    "id": "LiveKit-C2CCall",
+    "version": "1.0.0",
+    "description": "基于 LiveKit 私有化部署 1v1 视频通话插件，支持无障碍读屏、全事件回调、自定义铃声",
+    "_dp_type": "nativeplugin",
+    "_dp_nativeplugin": {
+        "android": {
+            "plugins": [
+                {
+                    "type": "module",
+                    "name": "LiveKit-C2CCall",
+                    "class": "com.livekit.c2ccall.LiveKitC2CCallModule"
+                }
+            ],
+            "integrateType": "aar",
+            "abis": [
+                "armeabi-v7a",
+                "arm64-v8a"
+            ],
+            "minSdkVersion": "24",
+            "permissions": [
+                "android.permission.CAMERA",
+                "android.permission.RECORD_AUDIO",
+                "android.permission.INTERNET",
+                "android.permission.ACCESS_NETWORK_STATE",
+                "android.permission.MODIFY_AUDIO_SETTINGS"
+            ],
+            "dependencies": [
+                "io.livekit:livekit-android-sdk:2.0.0"
+            ]
+        },
+        "ios": {
+            "plugins": [
+                {
+                    "type": "module",
+                    "name": "LiveKit-C2CCall",
+                    "class": "LiveKitC2CCallModule"
+                }
+            ],
+            "integrateType": "framework",
+            "deploymentTarget": "14.0",
+            "validArchitectures": [
+                "arm64"
+            ],
+            "embedSwift": true,
+            "compileOptions": {
+                "frameworks": [
+                    "AVFoundation.framework",
+                    "CoreMedia.framework",
+                    "VideoToolbox.framework",
+                    "AudioToolbox.framework",
+                    "CoreAudio.framework",
+                    "CoreVideo.framework"
+                ],
+                "libraries": [
+                    "c++",
+                    "resolv"
+                ]
+            },
+            "privacies": [
+                "NSCameraUsageDescription",
+                "NSMicrophoneUsageDescription"
+            ],
+            "plists": {
+                "NSCameraUsageDescription": "需要摄像头权限进行视频通话",
+                "NSMicrophoneUsageDescription": "需要麦克风权限进行语音通话",
+                "UIBackgroundModes": ["audio", "voip"]
+            }
+        }
+    }
+}

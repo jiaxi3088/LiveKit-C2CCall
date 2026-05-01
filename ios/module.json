@@ -1,0 +1,41 @@
+{
+    "name": "LiveKitC2CCall",
+    "id": "LiveKit-C2CCall",
+    "version": "1.0.0",
+    "description": "基于 LiveKit 1v1 视频通话插件，支持无障碍读屏、事件回调、自定义铃声",
+    "_dp_type": "nativeplugin",
+    "_dp_nativeplugin": {
+        "ios": {
+            "hooksClass": "",
+            "integrateType": "framework",
+            "plugins": [
+                {
+                    "type": "module",
+                    "name": "LiveKit-C2CCall",
+                    "class": "LiveKitC2CCallModule"
+                }
+            ],
+            "dependencies": [],
+            "compileOptions": {
+                "frameworks": [
+                    "AVFoundation.framework",
+                    "CoreMedia.framework",
+                    "VideoToolbox.framework",
+                    "AudioToolbox.framework",
+                    "CoreAudio.framework",
+                    "CoreVideo.framework"
+                ],
+                "libraries": [
+                    "c++",
+                    "resolv"
+                ],
+                "validArchitectures": [
+                    "arm64"
+                ]
+            },
+            "parameters": {},
+            "resources": [],
+            "embedSwift": true
+        }
+    }
+}
