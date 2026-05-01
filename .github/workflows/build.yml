@@ -64,6 +64,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Regenerate Gradle Wrapper (fix incomplete JAR)
+        working-directory: android
+        run: |
+          echo "=== Checking gradlew wrapper ==="
+          ls -la gradlew gradle/wrapper/gradle-wrapper.jar 2>/dev/null || echo "Wrapper files missing"
+          # Use system Gradle to regenerate a correct wrapper
+          gradle wrapper --gradle-version 8.10.2 --distribution-type bin
+          chmod +x gradlew
+          echo "=== Regenerated wrapper ==="
+          ls -la gradle/wrapper/gradle-wrapper.jar
+
       - name: Build Android AAR
         working-directory: android
         run: |
