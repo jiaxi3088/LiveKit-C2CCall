@@ -117,41 +117,11 @@ jobs:
           echo "[ok] Extracted $(ls "$STAGING_DIR" | wc -l) items"
 
           # ---- 第二步：用 Gradle 导出依赖文件列表 ----
+          # exportDeps 任务已预置在 build.gradle 中，直接调用即可
           echo ""
           echo "--- [2/5] Exporting runtime classpath ---"
 
-          cat > "$WORK_DIR/export-deps.gradle" << 'GRADLE_EOF'
-          tasks.register('exportDeps') {
-            doLast {
-              def rtc = configurations.findByName('releaseRuntimeClasspath')
-              if (rtc == null) {
-                rtc = configurations.findByName('runtimeClasspath')
-              }
-              if (rtc != null && rtc.canBeResolved) {
-                def outFile = file("${buildDir}/dep-files.txt")
-                outFile.text = rtc.files.findAll { it.exists() }.collect { it.absolutePath }.join('\n')
-                println "Exported ${rtc.files.size()} files to dep-files.txt"
-              } else {
-                def allFiles = []
-                configurations.findAll { it.canBeResolved }.each { cfg ->
-                  try {
-                    cfg.files.each { f ->
-                      if (f.exists() && f.name != 'uniapp-v8-release.aar') {
-                        allFiles.add(f.absolutePath)
-                      }
-                    }
-                  } catch(Exception ignored) {}
-                }
-                def outFile = file("${buildDir}/dep-files.txt")
-                outFile.text = allFiles.unique().join('\n')
-                println "Exported ${allFiles.size()} files (fallback mode)"
-              }
-            }
-          }
-          GRADLE_EOF
-
-          cd "$WORK_DIR"
-          ./gradlew exportDeps --no-daemon -q 2>&1 || true
+          ./gradlew exportDeps --no-daemon -q 2>&1
 
           DEP_LIST="build/dep-files.txt"
           if [ ! -f "$DEP_LIST" ]; then
@@ -287,7 +257,6 @@ jobs:
 
           # 清理临时文件
           rm -rf "$STAGING_DIR"
-          rm -f "$WORK_DIR/export-deps.gradle"
 
           # 最终校验
           if [ "$FINAL_SIZE" -lt 5242880 ]; then
