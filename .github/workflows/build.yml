@@ -30,10 +30,6 @@ jobs:
           echo "Installed platforms:"
           ls "$ANDROID_HOME/platforms/"
 
-      - name: Fix source issues
-        run: |
-          rm -f android/src/main/kotlin/com/livekit/c2ccall/LiveKitC2CCallModule.kt
-
       - name: Create uni-app SDK stub AAR
         run: |
           set -e
