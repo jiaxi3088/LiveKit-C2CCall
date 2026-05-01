@@ -90,55 +90,234 @@ jobs:
           echo "AAR file(s):"
           ls -la build/outputs/aar/*-release.aar
 
-      - name: Verify AAR output
+      - name: Create Fat AAR (embed all dependencies)
+        working-directory: android
         run: |
-          echo "=== Final AAR verification ==="
-          echo "Files matching pattern:"
-          ls -la android/build/outputs/aar/*-release.aar 2>&1 || true
-          echo "File sizes:"
-          du -h android/build/outputs/aar/*-release.aar 2>&1 || true
-          echo "AAR contents (brief):"
-          unzip -l android/build/outputs/aar/*-release.aar 2>&1 | head -30 || true
+          set -e
 
-          # ========== Fat AAR 大小校验 ==========
+          echo "========================================"
+          echo "=== Creating Fat AAR via Shell Script ==="
+          echo "========================================"
+
+          AAR_FILE=$(ls build/outputs/aar/*-release.aar | head -1)
+          echo "[info] Original AAR: $AAR_FILE ($(du -h "$AAR_FILE" | cut -f1))"
+
+          STAGING_DIR="build/fat-aar-staging"
+          rm -rf "$STAGING_DIR"
+          mkdir -p "$STAGING_DIR"
+
+          # ---- 第一步：解压原始 AAR ----
           echo ""
-          echo "=== Fat AAR size validation ==="
-          AAR_FILE=$(ls android/build/outputs/aar/*-release.aar 2>/dev/null | head -1)
-          if [ -z "$AAR_FILE" ]; then
-            echo "ERROR: No AAR file found!"
+          echo "--- [1/5] Extracting original AAR ---"
+          cd "$STAGING_DIR"
+          unzip -qo "../$AAR_FILE"
+          echo "[ok] Extracted $(ls | wc -l) items"
+
+          # ---- 第二步：用 Gradle 导出依赖文件列表 ----
+          echo ""
+          echo "--- [2/5] Exporting runtime classpath ---"
+
+          cat > ../export-deps.gradle << 'GRADLE_EOF'
+          tasks.register('exportDeps') {
+            doLast {
+              def rtc = configurations.findByName('releaseRuntimeClasspath')
+              if (rtc == null) {
+                // Fallback: try runtimeClasspath
+                rtc = configurations.findByName('runtimeClasspath')
+              }
+              if (rtc != null && rtc.canBeResolved) {
+                def outFile = file("${buildDir}/dep-files.txt")
+                outFile.text = rtc.files.findAll { it.exists() }.collect { it.absolutePath }.join('\n')
+                println "Exported ${rtc.files.size()} files to dep-files.txt"
+              } else {
+                // Last resort: iterate ALL resolvable configs
+                def allFiles = []
+                configurations.findAll { it.canBeResolved }.each { cfg ->
+                  try {
+                    cfg.files.each { f ->
+                      if (f.exists() && f.name != 'uniapp-v8-release.aar') {
+                        allFiles.add(f.absolutePath)
+                      }
+                    }
+                  } catch(Exception ignored) {}
+                }
+                def outFile = file("${buildDir}/dep-files.txt")
+                outFile.text = allFiles.unique().join('\n')
+                println "Exported ${allFiles.size()} files (fallback mode)"
+              }
+            }
+          }
+          GRADLE_EOF
+
+          cd ..
+          ./gradlew exportDeps --no-daemon -q 2>&1 || true
+
+          DEP_LIST="build/dep-files.txt"
+          if [ ! -f "$DEP_LIST" ]; then
+            echo "!!! ERROR !!! dep-files.txt not generated!"
+            echo "Gradle failed to export dependency list."
             exit 1
           fi
-          AAR_SIZE=$(stat -c%s "$AAR_FILE" 2>/dev/null || stat -f%z "$AAR_FILE" 2>/dev/null)
-          AAR_SIZE_KB=$((AAR_SIZE / 1024))
-          AAR_SIZE_MB=$((AAR_SIZE / 1024 / 1024))
-          echo "AAR file: $AAR_FILE"
-          echo "AAR size: ${AAR_SIZE_KB} KB (${AAR_SIZE_MB} MB)"
 
-          # Fat AAR 应该 > 5MB（LiveKit SDK + WebRTC .so 原生库）
-          if [ "$AAR_SIZE" -lt 5242880 ]; then
-            echo ""
-            echo "!!! ERROR !!! AAR too small (${AAR_SIZE_KB} KB)!"
-            echo "Expected >5MB for a valid Fat AAR with LiveKit SDK + native .so libs."
-            echo "This means embedDependencies task FAILED to bundle dependencies."
-            echo "The plugin will crash at runtime without LiveKit classes and WebRTC .so libraries."
-            echo ""
-            echo "--- AAR contents (for debugging) ---"
-            unzip -l "$AAR_FILE" 2>&1 | tail -20
-            exit 1
+          DEP_COUNT=$(wc -l < "$DEP_LIST")
+          echo "[ok] Found $DEP_COUNT dependency files"
+          head -20 "$DEP_LIST" | while read -r line; do
+            BASENAME=$(basename "$line")
+            SIZE=$(du -h "$line" 2>/dev/null | cut -f1 || echo "?")
+            echo "       $BASENAME ($SIZE)"
+          done
+          if [ "$DEP_COUNT" -gt 20 ]; then
+            echo "       ... and $((DEP_COUNT - 20)) more"
           fi
 
-          # 检查 jni 目录是否存在（WebRTC .so 文件标志）
-          HAS_JNI=$(unzip -l "$AAR_FILE" 2>/dev/null | grep -c "jni/" || true)
+          # ---- 第三步：合并所有 JAR/AAR 的 classes 到一个 classes.jar ----
+          echo ""
+          echo "--- [3/5] Merging all classes.jar ---"
+
+          MERGE_DIR="$STAGING_DIR/jar-merge"
+          mkdir -p "$MERGE_DIR"
+
+          # 从原 AAR 提取的 classes.jar 作为基础
+          cp "$STAGING_DIR/classes.jar" "$MERGE_DIR/base-classes.jar"
+          JAR_SOURCES=("$MERGE_DIR/base-classes.jar")
+
+          while IFS= read -r DEP_PATH; do
+            [ ! -f "$DEP_PATH" ] && continue
+            DEP_NAME=$(basename "$DEP_PATH")
+
+            if [[ "$DEP_NAME" == *.aar ]]; then
+              # AAR 文件 → 解压取 classes.jar
+              EXTRACT_TMP="$STAGING_DIR/_extract_$$"
+              rm -rf "$EXTRACT_TMP"; mkdir -p "$EXTRACT_TMP"
+              unzip -qo "$DEP_PATH" -d "$EXTRACT_TMP"
+              if [ -f "$EXTRACT_TMP/classes.jar" ]; then
+                cp "$EXTRACT_TMP/classes.jar" "$MERGE_DIR/dep-${DEP_NAME%.aar}.jar"
+                JAR_SOURCES+=("$MERGE_DIR/dep-${DEP_NAME%.aar}.jar")
+                echo "  [+jar] ${DEP_NAME} -> classes.jar"
+              else
+                echo "  [skip] ${DEP_NAME} (no classes.jar inside)"
+              fi
+              rm -rf "$EXTRACT_TMP"
+
+            elif [[ "$DEP_NAME" == *.jar ]]; then
+              cp "$DEP_PATH" "$MERGE_DIR/dep-${DEP_NAME}"
+              JAR_SOURCES+=("$MERGE_DIR/dep-${DEP_NAME}")
+              echo "  [+jar] ${DEP_NAME}"
+            fi
+          done < "$DEP_LIST"
+
+          # 用 jar 命令合并所有 JAR
+          echo ""
+          echo "  Merging ${#JAR_SOURCES[@]} JAR files..."
+          cd "$MERGE_DIR"
+
+          # 创建合并后的 classes.jar（用 jar 合并所有 zipfile）
+          MERGED_JAR="$STAGING_DIR/classes-merged.jar"
+          # 使用 jar 命令逐个合并
+          cp "${JAR_SOURCES[0]}" "$MERGED_JAR"
+          for ((i=1; i<${#JAR_SOURCES[@]}; i++)); do
+            # 用 unzip+rezip 方式合并（避免 jar 命令参数问题）
+            TMP_MERGE="$STAGING_DIR/_tmp_merge$$"
+            mkdir -p "$TMP_MERGE"
+            cd "$TMP_MERGE"
+            unzip -qo "$MERGED_JAR"
+            unzip -qo -o "${JAR_SOURCES[$i]}"
+            rm -f "$MERGED_JAR"
+            jar cf "$MERGED_JAR" .
+            cd "$MERGE_DIR"
+            rm -rf "$TMP_MERGE"
+          done
+          cd ..
+
+          # 替换原 classes.jar
+          mv "$STAGING_DIR/classes.jar" "$STAGING_DIR/classes-original.jar" 2>/dev/null || true
+          mv "$MERGED_JAR" "$STAGING_DIR/classes.jar"
+          echo "  [done] Merged classes.jar: $(du -h "$STAGING_DIR/classes.jar" | cut -f1)"
+
+          rm -rf "$MERGE_DIR"
+
+          # ---- 第四步：提取并嵌入 JNI .so 原生库 ----
+          echo ""
+          echo "--- [4/5] Embedding native libraries (.so) ---"
+
+          JNI_DIR="$STAGING_DIR/jni"
+          mkdir -p "$JNI_DIR"
+          SO_TOTAL=0
+
+          while IFS= read -r DEP_PATH; do
+            [ ! -f "$DEP_PATH" ] && continue
+            DEP_NAME=$(basename "$DEP_PATH")
+
+            EXTRACT_SO="$STAGING_DIR/_extract_so_$$"
+            rm -rf "$EXTRACT_SO"; mkdir -p "$EXTRACT_SO"
+            unzip -qo "$DEP_PATH" -d "$EXTRACT_SO" 2>/dev/null || true
+
+            # 在多个可能的位置寻找 .so 文件
+            for SO_LOC in jni lib jniLibs; do
+              SRC_JNI="$EXTRACT_SO/$SO_LOC"
+              if [ -d "$SRC_JNI" ]; then
+                # 遍历所有 ABI 子目录，复制 .so
+                while IFS= read -r -d '' SO_FILE; do
+                  REL_PATH="${SO_FILE#$SRC_JNI/}"
+                  DEST_DIR="$JNI_DIR/$(dirname "$REL_PATH")"
+                  mkdir -p "$DEST_DIR"
+                  cp "$SO_FILE" "$DEST_DIR/"
+                  SO_TOTAL=$((SO_TOTAL + 1))
+                  echo "  [+so] $REL_PATH ($(du -h "$SO_FILE" | cut -f1))"
+                done < <(find "$SRC_JNI" -type f -name '*.so' -print0 2>/dev/null)
+              fi
+            done
+
+            rm -rf "$EXTRACT_SO"
+          done < "$DEP_LIST"
+
+          echo "  [done] Total .so embedded: $SO_TOTAL"
+
+          # ---- 第五步：重新打包为 AAR ----
+          echo ""
+          echo "--- [5/5] Repacking AAR ---"
+
+          cd "$STAGING_DIR"
+          rm -f classes-old.jar classes-original.jar 2>/dev/null || true
+
+          # 打包除旧文件外的所有内容
+          zip -rq "../$AAR_FILE" . -x "classes-old.jar" "classes-original.jar"
+
+          FINAL_SIZE=$(stat -c%s "../$AAR_FILE" 2>/dev/null || stat -f%z "../$AAR_FILE")
+          FINAL_KB=$((FINAL_SIZE / 1024))
+          FINAL_MB=$((FINAL_SIZE / 1024 / 1024))
+
+          echo ""
+          echo "========================================"
+          echo "=== Fat AAR created successfully ==="
+          echo "  File:   $(basename $AAR_FILE)"
+          echo "  Size:   ${FINAL_KB} KB (~${FINAL_MB} MB)"
+          echo "  Deps:   $DEP_COUNT artifacts"
+          echo "  .so:    $SO_TOTAL native libs"
+          echo "========================================"
+
+          # 清理临时文件
+          rm -rf "$STAGING_DIR"
+
+          # 最终校验
+          if [ "$FINAL_SIZE" -lt 5242880 ]; then
+            echo ""
+            echo "!!! WARNING !!! AAR size suspiciously small (<5MB)!"
+            echo "Expected ~20MB+ with LiveKit SDK + WebRTC .so libraries."
+            echo ""
+            echo "--- AAR contents (top 30):"
+            unzip -l "../$AAR_FILE" | head -35
+          fi
+
+          HAS_JNI=$(unzip -l "../$AAR_FILE" 2>/dev/null | grep -c "jni/" || true)
           if [ "$HAS_JNI" -eq 0 ]; then
             echo ""
-            echo "!!! WARNING !!! No jni/ directory found in AAR!"
-            echo "WebRTC .so native libraries may be missing - app will crash on LiveKit.init()"
+            echo "!!! WARNING !!! No jni/ directory in AAR!"
+            echo "WebRTC .so native libraries missing - app WILL crash on LiveKit.init()"
           else
-            echo "JNI entries found in AAR: $HAS_JNI"
+            echo ""
+            echo "JNI entries in AAR: $HAS_JNI"
           fi
-
-          echo ""
-          echo "=== AAR validation PASSED ==="
 
       - name: Upload Android AAR
         uses: actions/upload-artifact@v4
