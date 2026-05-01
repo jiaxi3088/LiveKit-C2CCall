@@ -78,7 +78,9 @@ tasks.register('embedDependencies') {
         stagingDir.deleteDir()
         stagingDir.mkdirs()
 
+        println "========================================"
         println "=== Embedding dependencies into ${aarFile.name} ==="
+        println "========================================"
 
         // 解压原 AAR
         copy {
@@ -86,67 +88,145 @@ tasks.register('embedDependencies') {
             into stagingDir
         }
 
-        // 将所有 fatAarImplementation 依赖嵌入 classes.jar
-        def embeddedJars = []
-        configurations.fatAarImplementation.resolvedConfiguration.resolvedArtifacts.each { artifact ->
-            if (artifact.file?.name?.endsWith('.jar') || artifact.file?.name?.endsWith('.aar')) {
-                embeddedJars.add(artifact.file)
-                println "  + ${artifact.file.name} (${artifact.file.size()} bytes)"
+        // 收集所有运行时依赖（包括传递依赖），使用 runtimeClasspath 确保完整依赖树
+        def runtimeConfig = configurations.runtimeClasspath
+            ?: configurations.getByName('releaseRuntimeClasspath')
+        
+        def allArtifacts = []
+        def seenFiles = new HashSet<String>()
+
+        runtimeConfig.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+            def file = artifact.file
+            if (file?.exists() && !seenFiles.contains(file.absolutePath)) {
+                if (file.name.endsWith('.jar') || file.name.endsWith('.aar')) {
+                    allArtifacts.add(file)
+                    seenFiles.add(file.absolutePath)
+                }
             }
         }
 
-        if (embeddedJars.isEmpty()) {
-            println "  WARNING: No dependencies found to embed"
+        println ""
+        println "Found ${allArtifacts.size()} artifacts to process:"
+        allArtifacts.each { f ->
+            println "  + ${f.name} (${f.size() / 1024} KB)"
+        }
+        println ""
+
+        if (allArtifacts.isEmpty()) {
+            println "  WARNING: No dependencies found to embed!"
         } else {
-            // 合并 classes.jar
-            def mergedJar = file("${stagingDir}/classes-merged.jar")
-            ant.jar(destfile: mergedJar) {
-                // 原有 classes.jar 内容
-                zipfileset(src: "${stagingDir}/classes.jar")
-                // 所有依赖的 jar/aar 内容
-                embeddedJars.each { dep ->
-                    if (dep.name.endsWith('.aar')) {
-                        // AAR → 提取里面的 classes.jar
-                        def aarStaging = file("${buildDir}/aar-extract-${dep.name}")
-                        aarStaging.deleteDir()
-                        copy { from zipTree(dep); into aarStaging }
-                        zipfileset(src: "${aarStaging}/classes.jar")
-                    } else {
-                        zipfileset(src: dep)
+            // ===== 第一步：合并所有 classes.jar / classes.jar (from aar) =====
+            def jarSources = []
+            
+            // 先加入原 AAR 的 classes.jar
+            jarSources.add(file("${stagingDir}/classes.jar"))
+            println "  [base] Original classes.jar"
+
+            // 提取每个依赖的类文件
+            allArtifacts.each { dep ->
+                if (dep.name.endsWith('.aar')) {
+                    def extractDir = file("${buildDir}/dep-extract-${System.nanoTime()}-${dep.name.hashCode()}")
+                    extractDir.deleteDir()
+                    copy { from zipTree(dep); into extractDir }
+                    
+                    def classesJar = file("${extractDir}/classes.jar")
+                    if (classesJar.exists()) {
+                        jarSources.add(classesJar)
+                        println "  [+jar] ${dep.name} -> classes.jar (${classesJar.length() / 1024} KB)"
                     }
+                } else if (dep.name.endsWith('.jar')) {
+                    jarSources.add(dep)
+                    println "  [+jar] ${dep.name} (${dep.length() / 1024} KB)"
                 }
             }
+
+            // 合并所有 JAR
+            def mergedJar = file("${stagingDir}/classes-merged.jar")
+            ant.jar(destfile: mergedJar, index: true, manifest: "${stagingDir}/manifest") {
+                jarSources.each { src ->
+                    zipfileset(src: src)
+                }
+            }
+
+            // 替换原 classes.jar
             ant.move(file: "${stagingDir}/classes.jar", tofile: "${stagingDir}/classes-old.jar", failonerror: false)
             ant.move(file: mergedJar, tofile: "${stagingDir}/classes.jar")
+            println ""
+            println "  [merge] Merged into single classes.jar (${new File("${stagingDir}/classes.jar").length() / 1024} KB)"
 
-            // 嵌入 JNI .so 库（如果有）
-            embeddedJars.each { dep ->
-                if (dep.name.endsWith('.aar')) {
-                    def aarStaging = file("${buildDir}/aar-jni-${dep.name}")
-                    aarStaging.deleteDir()
-                    copy { from zipTree(dep); into aarStaging }
-                    def jniDir = file("${aarStaging}/jni")
-                    if (jniDir.exists()) {
-                        copy {
-                            from jniDir
-                            into "${stagingDir}/jni"
-                        }
-                        println "  + Embedded JNI libs from ${dep.name}"
+            // ===== 第二步：收集并嵌入所有 JNI .so 原生库 =====
+            println ""
+            println "  === Collecting native libraries (.so) ==="
+
+            def targetJni = file("${stagingDir}/jni")
+            targetJni.mkdirs()
+
+            def soCount = 0
+            allArtifacts.each { dep ->
+                def extractDir = file("${buildDir}/jni-extract-${System.nanoTime()}-${dep.name.hashCode()}")
+                extractDir.deleteDir()
+                
+                try {
+                    copy { from zipTree(dep); into extractDir }
+                    
+                    def srcJni = file("${extractDir}/jni")
+                    if (!srcJni.exists()) {
+                        // 有些 AAR 把 .so 放在 lib/ 目录下
+                        srcJni = file("${extractDir}/lib")
                     }
+                    
+                    if (srcJni.exists()) {
+                        // 遍历所有 ABI 子目录
+                        srcJni.eachDirRecurse { abiDir ->
+                            def relativePath = srcJni.toURI().relativize(abiDir.toURI()).toString()
+                            abiDir.eachFileMatch(~/.*\.so/) { soFile ->
+                                def destPath = "${targetJni}/${relativePath}/${soFile.name}"
+                                copy {
+                                    from soFile
+                                    into "${targetJni}/${relativePath}"
+                                }
+                                println "  [+so] ${relativePath}/${soFile.name} (${soFile.length() / 1024} KB)"
+                                soCount++
+                            }
+                        }
+                    }
+                } catch (e) {
+                    println "  [warn] Failed to extract JNI from ${dep.name}: ${e.message}"
+                } finally {
+                    extractDir.deleteDir()
+                }
+            }
+
+            println "  Total .so files embedded: $soCount"
+
+            // 清理临时提取目录
+            file("${buildDir}").eachDir { dir ->
+                if (dir.name.startsWith('dep-extract-') || dir.name.startsWith('jni-extract-') ||
+                    dir.name.startsWith('aar-extract-') || dir.name.startsWith('aar-jni-')) {
+                    dir.deleteDir()
                 }
             }
         }
 
-        // 重新打包 AAR
-        ant.zip(destfile: aarFile) {
+        // ===== 第三步：重新打包 AAR =====
+        ant.zip(destfile: aarFile, compress: true) {
             fileset(dir: stagingDir) {
                 exclude(name: 'classes-old.jar')
             }
         }
 
         def newSize = aarFile.length()
-        println "=== Fat AAR created: ${aarFile.name} (${newSize} bytes / ${(newSize / 1024).round()} KB) ==="
-        println "Embedded ${embeddedJars.size()} dependencies"
+        def newSizeKB = (newSize / 1024).round()
+        def newSizeMB = (newSize / (1024 * 1024)).round() * 10 / 10.0
+        
+        println ""
+        println "========================================"
+        println "=== Fat AAR created successfully! ==="
+        println "  File: ${aarFile.name}"
+        println "  Size: ${newSizeKB} KB (~${newSizeMB} MB)"
+        println "  Dependencies: ${allArtifacts.size()}"
+        println "========================================"
+        
         stagingDir.deleteDir()
     }
 }
