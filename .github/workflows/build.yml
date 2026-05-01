@@ -212,9 +212,7 @@ jobs:
       - name: Debug: list available artifacts
         run: |
           echo "=== Listing all workflow artifacts ==="
-          # Use GitHub CLI to list artifacts if available
-          gh run view ${{ github.run_id }} --log-failed 2>/dev/null || echo "gh not available or no failed logs"
-          echo "Workflow run ID: ${{ github.run_id }}"
+          echo "Workflow run ID: $GITHUB_RUN_ID"
           echo "Attempting download from dependent jobs..."
 
       - name: Download Android AAR
