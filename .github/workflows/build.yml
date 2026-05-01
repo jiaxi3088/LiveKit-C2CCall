@@ -209,7 +209,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug: list available artifacts
+      - name: List available artifacts
         run: |
           echo "=== Listing all workflow artifacts ==="
           echo "Workflow run ID: $GITHUB_RUN_ID"
