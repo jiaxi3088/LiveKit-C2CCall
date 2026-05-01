@@ -29,7 +29,7 @@ git push origin main
 
 ## 二、安装步骤
 
-### 2.1 获取插件包
+### 2.1 获取插件包 
 
 插件通过 GitHub Actions 自动编译生成。方式有两种：
 
