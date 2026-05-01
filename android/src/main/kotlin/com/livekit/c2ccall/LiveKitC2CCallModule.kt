@@ -11,14 +11,12 @@ import io.dcloud.feature.uniapp.common.UniModule
 import io.livekit.android.LiveKit
 import io.livekit.android.events.ParticipantEvent
 import io.livekit.android.events.RoomEvent
-import io.livekit.android.options.CameraCaptureOptions
 import io.livekit.android.options.ConnectOptions
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.Track.Kind as TrackKind
-import io.livekit.android.room.track.VideoPreset
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -336,30 +334,6 @@ class LiveKitC2CCallModule : UniModule() {
             }
         }
         room = null
-    }
-
-    /**
-     * 解析摄像头采集配置
-     */
-    private fun parseCameraCaptureOptions(videoOpts: Map<String, Any>?): CameraCaptureOptions {
-        val position = videoOpts?.get("position") as? String ?: "front"
-        val encoding = videoOpts?.get("encoding") as? String ?: "QHD"
-
-        val cameraPosition = if ("back" == position) CameraPosition.BACK else CameraPosition.FRONT
-
-        val preset = when (encoding.uppercase()) {
-            "QVGA" -> VideoPreset.QVGA
-            "VGA"  -> VideoPreset.VGA
-            "QHD"  -> VideoPreset.QHD
-            "HD"   -> VideoPreset.HD
-            "FHD"  -> VideoPreset.FHD
-            else   -> VideoPreset.QHD
-        }
-
-        return CameraCaptureOptions(
-            position = cameraPosition,
-            preset = preset
-        )
     }
 
     /**
