@@ -41,12 +41,23 @@ android {
 }
 
 // ========== Fat AAR 构建：将所有依赖打入最终 AAR ==========
+// 核心原理：创建一个可解析（resolvable）配置来收集运行时依赖的所有 artifact 文件
 configurations {
-    // 收集需要打包进 AAR 的运行时依赖
+    // 声明式配置：依赖写在这里（不可解析，仅用于编译）
     fatAarImplementation
+
+    // 可解析配置：继承上面的依赖，在 embedDependencies 中解析获取实际文件
+    fatAarClasspath {
+        canBeResolved = true
+        canBeConsumed = false
+    }
 }
+
+// 确保 implementation 继承 fatAarImplementation（编译时可用）
+// 同时 fatAarClasspath 也继承它（打包时解析用）
 afterEvaluate {
     configurations.implementation.extendsFrom(configurations.fatAarImplementation)
+    configurations.fatAarClasspath.extendsFrom(configurations.fatAarImplementation)
 }
 
 dependencies {
@@ -65,7 +76,7 @@ dependencies {
 
 tasks.register('embedDependencies') {
     group = 'build'
-    description = 'Embed all runtime dependencies into the release AAR'
+    description = 'Embed all runtime dependencies into the release AAR (Fat AAR)'
 
     doLast {
         def outputDir = file("${buildDir}/outputs/aar")
@@ -91,201 +102,121 @@ tasks.register('embedDependencies') {
             into stagingDir
         }
 
-        // ========== 收集依赖：优先从 fatAarImplementation，回退到 implementation ==========
+        // ========== 使用可解析配置收集所有依赖（含传递依赖）==========
+        def resolveConfig = configurations.fatAarClasspath
+        println "[resolve] Using fatAarClasspath config (resolvable=${resolveConfig.canBeResolved})"
+
         def allArtifacts = []
         def seenFiles = new HashSet<String>()
 
-        // 方法1：直接从 fatAarImplementation 配置获取
-        try {
-            def fatConfig = configurations.findByName('fatAarImplementation')
-            if (fatConfig && fatConfig.isCanBeResolved()) {
-                println "[collect] Trying fatAarImplementation configuration..."
-                fatConfig.resolvedConfiguration.resolvedArtifacts.each { artifact ->
-                    def file = artifact.file
-                    if (file?.exists() && !seenFiles.contains(file.absolutePath)) {
-                        if (file.name.endsWith('.jar') || file.name.endsWith('.aar')) {
-                            allArtifacts.add(file)
-                            seenFiles.add(file.absolutePath)
-                        }
-                    }
+        resolveConfig.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+            def file = artifact.file
+            if (file?.exists() && !seenFiles.contains(file.absolutePath)) {
+                if (file.name.endsWith('.jar') || file.name.endsWith('.aar')) {
+                    allArtifacts.add(file)
+                    seenFiles.add(file.absolutePath)
                 }
-            }
-        } catch (e) {
-            println "[collect] fatAarImplementation not resolvable: ${e.message}"
-        }
-
-        // 方法2：如果方法1没结果，尝试 implementation（解析所有传递依赖）
-        if (allArtifacts.isEmpty()) {
-            try {
-                println "[collect] Falling back to implementation configuration..."
-                def implConfig = configurations.findByName('implementation')
-                if (implConfig && implConfig.isCanBeResolved()) {
-                    implConfig.resolvedConfiguration.resolvedArtifacts.each { artifact ->
-                        def file = artifact.file
-                        if (file?.exists() && !seenFiles.contains(file.absolutePath)) {
-                            if (file.name.endsWith('.jar') || file.name.endsWith('.aar')) {
-                                allArtifacts.add(file)
-                                seenFiles.add(file.absolutePath)
-                            }
-                        }
-                    }
-                }
-            } catch (e) {
-                println "[collect] implementation not resolvable: ${e.message}"
-            }
-        }
-
-        // 方法3：如果还是空，尝试 releaseRuntimeClasspath
-        if (allArtifacts.isEmpty()) {
-            try {
-                println "[collect] Falling back to releaseRuntimeClasspath..."
-                def rtcConfig = configurations.findByName('releaseRuntimeClasspath')
-                if (rtcConfig) {
-                    rtcConfig.resolvedConfiguration.resolvedArtifacts.each { artifact ->
-                        def file = artifact.file
-                        if (file?.exists() && !seenFiles.contains(file.absolutePath)) {
-                            if (file.name.endsWith('.jar') || file.name.endsWith('.aar')) {
-                                allArtifacts.add(file)
-                                seenFiles.add(file.absolutePath)
-                            }
-                        }
-                    }
-                }
-            } catch (e) {
-                println "[collect] releaseRuntimeClasspath failed: ${e.message}"
-            }
-        }
-
-        // 方法4：最后手段 - 遍历所有配置寻找依赖
-        if (allArtifacts.isEmpty()) {
-            println "[collect] Last resort: scanning ALL configurations..."
-            configurations.findAll { it.canBeResolved }.each { config ->
-                try {
-                    config.resolvedConfiguration.resolvedArtifacts.each { artifact ->
-                        def file = artifact.file
-                        def compName = artifact.moduleVersion?.id?.toString() ?: file.name
-                        // 排除本地和 Android 自带的东西
-                        if (file?.exists() && !seenFiles.contains(file.absolutePath)
-                            && (file.name.endsWith('.jar') || file.name.endsWith('.aar'))
-                            && !compName.startsWith('android.android')
-                            && !compName.startsWith('__local_')
-                            && file.name != 'uniapp-v8-release.aar') {
-                            allArtifacts.add(file)
-                            seenFiles.add(file.absolutePath)
-                        }
-                    }
-                } catch (ignored) {}
             }
         }
 
         println ""
-        println "Found ${allArtifacts.size()} artifacts to process:"
+        println "Found ${allArtifacts.size()} artifacts to embed:"
         allArtifacts.each { f ->
             println "  + ${f.name} (${f.size() / 1024} KB)"
         }
         println ""
 
         if (allArtifacts.isEmpty()) {
-            println "!!! WARNING !!! No dependencies found to embed!"
-            println "AAR will remain as original thin package (${originalSize / 1024} KB)"
-            println "This will cause runtime crashes due to missing LiveKit SDK classes."
-        } else {
-            // ===== 第一步：合并所有 classes.jar =====
-            def jarSources = []
-
-            // 先加入原 AAR 的 classes.jar
-            jarSources.add(file("${stagingDir}/classes.jar"))
-            println "  [base] Original classes.jar (${new File('${stagingDir}/classes.jar').length() / 1024} KB)"
-
-            // 提取每个依赖的类文件
-            allArtifacts.each { dep ->
-                if (dep.name.endsWith('.aar')) {
-                    def extractDir = file("${buildDir}/dep-extract-${System.nanoTime()}-${dep.name.hashCode()}")
-                    extractDir.deleteDir()
-                    copy { from zipTree(dep); into extractDir }
-
-                    def classesJar = file("${extractDir}/classes.jar")
-                    if (classesJar.exists()) {
-                        jarSources.add(classesJar)
-                        println "  [+jar] ${dep.name} -> classes.jar (${classesJar.length() / 1024} KB)"
-                    } else {
-                        println "  [skip] ${dep.name} (no classes.jar inside)"
-                    }
-                } else if (dep.name.endsWith('.jar')) {
-                    jarSources.add(dep)
-                    println "  [+jar] ${dep.name} (${dep.length() / 1024} KB)"
-                }
-            }
-
-            // 合并所有 JAR
-            def mergedJar = file("${stagingDir}/classes-merged.jar")
-            ant.jar(destfile: mergedJar, index: true, manifest: "${stagingDir}/manifest") {
-                jarSources.each { src ->
-                    zipfileset(src: src)
-                }
-            }
-
-            // 替换原 classes.jar
-            ant.move(file: "${stagingDir}/classes.jar", tofile: "${stagingDir}/classes-old.jar", failonerror: false)
-            ant.move(file: mergedJar, tofile: "${stagingDir}/classes.jar")
-            println ""
-            println "  [merge] Merged into single classes.jar (${new File("${stagingDir}/classes.jar").length() / 1024} KB)"
-
-            // ===== 第二步：收集并嵌入所有 JNI .so 原生库 =====
-            println ""
-            println "  === Collecting native libraries (.so) ==="
-
-            def targetJni = file("${stagingDir}/jni")
-            targetJni.mkdirs()
-
-            def soCount = 0
-            allArtifacts.each { dep ->
-                def extractDir = file("${buildDir}/jni-extract-${System.nanoTime()}-${dep.name.hashCode()}")
-                extractDir.deleteDir()
-
-                try {
-                    copy { from zipTree(dep); into extractDir }
-
-                    // 检查多个可能的 .so 位置
-                    def jniLocations = ['jni', 'lib', 'jniLibs']
-                    def srcJni = null
-                    for (loc in jniLocations) {
-                        def candidate = file("${extractDir}/${loc}")
-                        if (candidate.exists()) {
-                            srcJni = candidate
-                            break
-                        }
-                    }
-
-                    if (srcJni != null && srcJni.exists()) {
-                        srcJni.eachDirRecurse { abiDir ->
-                            def relativePath = srcJni.toURI().relativize(abiDir.toURI()).toString()
-                            abiDir.eachFileMatch(~/.*\.so/) { soFile ->
-                                def destPath = "${targetJni}/${relativePath}/${soFile.name}"
-                                copy {
-                                    from soFile
-                                    into "${targetJni}/${relativePath}"
-                                }
-                                println "  [+so] ${relativePath}/${soFile.name} (${soFile.length() / 1024} KB)"
-                                soCount++
-                            }
-                        }
-                    }
-                } catch (e) {
-                    println "  [warn] Failed to extract JNI from ${dep.name}: ${e.message}"
-                } finally {
-                    extractDir.deleteDir()
-                }
-            }
-
-            println "  Total .so files embedded: $soCount"
+            throw new GradleException("""
+                !!! FATAL: No dependencies found from fatAarClasspath configuration! !!!
+                This means fatAarImplementation dependencies were NOT resolved.
+                Check that:
+                  1. Dependencies are declared with 'fatAarImplementation' (not 'implementation')
+                  2. The fatAarClasspath configuration is properly set up as resolvable
+                  3. Maven repositories are accessible
+                AAR will be only ~28KB and app WILL crash at runtime!
+            """.stripIndent())
         }
 
-        // 清理临时提取目录
-        file("${buildDir}").eachDir { dir ->
-            if (dir.name.startsWith('dep-extract-') || dir.name.startsWith('jni-extract-') ||
-                dir.name.startsWith('aar-extract-') || dir.name.startsWith('aar-jni-')) {
-                dir.deleteDir()
+        // ===== 第一步：合并所有 classes.jar =====
+        def jarSources = []
+        jarSources.add(file("${stagingDir}/classes.jar"))
+        println "  [base] Original classes.jar (${new File(stagingDir, 'classes.jar').length() / 1024} KB)"
+
+        allArtifacts.each { dep ->
+            if (dep.name.endsWith('.aar')) {
+                def extractDir = file("${buildDir}/dep-extract-${dep.name.hashCode()}")
+                extractDir.deleteDir()
+                copy { from zipTree(dep); into extractDir }
+
+                def classesJar = file("${extractDir}/classes.jar")
+                if (classesJar.exists()) {
+                    jarSources.add(classesJar)
+                    println "  [+jar] ${dep.name} -> classes.jar (${classesJar.length() / 1024} KB)"
+                } else {
+                    println "  [skip] ${dep.name} (no classes.jar inside AAR)"
+                }
+            } else if (dep.name.endsWith('.jar')) {
+                jarSources.add(dep)
+                println "  [+jar] ${dep.name} (${dep.length() / 1024} KB)"
+            }
+        }
+
+        // 合并所有 JAR 为一个 classes.jar
+        def mergedJar = file("${stagingDir}/classes-merged.jar")
+        ant.jar(destfile: mergedJar, index: true, manifest: "${stagingDir}/manifest") {
+            jarSources.each { src ->
+                zipfileset(src: src)
+            }
+        }
+
+        ant.move(file: "${stagingDir}/classes.jar", tofile: "${stagingDir}/classes-old.jar", failonerror: false)
+        ant.move(file: mergedJar, tofile: "${stagingDir}/classes.jar")
+        println ""
+        println "  [merge] Merged classes.jar (${new File(stagingDir, 'classes.jar').length() / 1024} KB)"
+
+        // ===== 第二步：嵌入 JNI .so 原生库（WebRTC 等）=====
+        println ""
+        println "  === Collecting native libraries (.so) ==="
+        def targetJni = file("${stagingDir}/jni")
+        targetJni.mkdirs()
+
+        def soCount = 0
+        allArtifacts.each { dep ->
+            def extractDir = file("${buildDir}/jni-extract-${dep.name.hashCode()}")
+            extractDir.deleteDir()
+
+            try {
+                copy { from zipTree(dep); into extractDir }
+
+                def srcJni = null
+                for (loc in ['jni', 'lib', 'jniLibs']) {
+                    def candidate = file("${extractDir}/${loc}")
+                    if (candidate.exists()) { srcJni = candidate; break }
+                }
+
+                if (srcJni?.exists()) {
+                    srcJni.eachDirRecurse { abiDir ->
+                        def relPath = srcJni.toURI().relativize(abiDir.toURI()).toString()
+                        abiDir.eachFileMatch(~/.*\.so/) { soFile ->
+                            copy { from soFile; into "${targetJni}/${relPath}" }
+                            println "  [+so] ${relPath}/${soFile.name} (${soFile.length() / 1024} KB)"
+                            soCount++
+                        }
+                    }
+                }
+            } catch (e) {
+                println "  [warn] JNI extraction failed for ${dep.name}: ${e.message}"
+            } finally {
+                extractDir.deleteDir()
+            }
+        }
+        println "  Total .so files embedded: $soCount"
+
+        // 清理临时目录
+        file("${buildDir}").eachDir { d ->
+            if (d.name.startsWith('dep-extract-') || d.name.startsWith('jni-extract-')) {
+                d.deleteDir()
             }
         }
 
@@ -297,25 +228,17 @@ tasks.register('embedDependencies') {
         }
 
         def newSize = aarFile.length()
-        def newSizeKB = (newSize / 1024).round()
+        def newSizeKB = newSize.intdiv(1024)
         def newSizeMB = (newSize / (1024 * 1024)).round(1)
 
         println ""
         println "========================================"
-        println "=== Fat AAR result ==="
-        println "  File: ${aarFile.name}"
-        println "  Before: ${originalSize / 1024} KB"
-        println "  After:  ${newSizeKB} KB (~${newSizeMB} MB)"
-        println "  Dependencies embedded: ${allArtifacts.size()}"
-
-        // 最小大小校验：正常 Fat AAR 至少应该 > 5MB（LiveKit SDK + WebRTC .so 很大）
-        if (newSize < 5 * 1024 * 1024 && allArtifacts.size() > 0) {
-            println "  WARNING: AAR size suspiciously small! Expected >5MB with dependencies"
-        }
-        if (newSize < 500 * 1024) {
-            println "  !!! ERROR: AAR too small (${newSizeKB} KB), dependencies NOT embedded correctly!"
-            println "  The app WILL crash at runtime without LiveKit SDK classes and .so libs!"
-        }
+        println "=== Fat AAR created successfully ==="
+        println "  File:    ${aarFile.name}"
+        println "  Before:  ${originalSize.intdiv(1024)} KB"
+        println "  After:   ${newSizeKB} KB (~${newSizeMB} MB)"
+        println "  Deps:    ${allArtifacts.size()} artifacts"
+        println "  .so:     $soCount native libs"
         println "========================================"
 
         stagingDir.deleteDir()
