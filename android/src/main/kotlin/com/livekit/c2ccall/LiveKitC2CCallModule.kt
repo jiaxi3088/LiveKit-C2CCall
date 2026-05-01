@@ -80,7 +80,7 @@ class LiveKitC2CCallModule : UniModule() {
 
                 // 在单独协程中收集房间事件（EventListenable.collect() 返回 Nothing，会一直运行）
                 scope.launch {
-                    room?.collect { event ->
+                    room?.events?.collect { event: RoomEvent ->
                         handleRoomEvent(event)
                     }
                 }
@@ -139,7 +139,7 @@ class LiveKitC2CCallModule : UniModule() {
 
                 // 在单独协程中收集房间事件
                 scope.launch {
-                    room?.collect { event ->
+                    room?.events?.collect { event: RoomEvent ->
                         handleRoomEvent(event)
                     }
                 }
@@ -272,7 +272,7 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun observeRemoteParticipant(remote: RemoteParticipant) {
         scope.launch {
-            remote.collect { event ->
+            remote.events?.collect { event: ParticipantEvent ->
                 when (event) {
                     is ParticipantEvent.TrackPublished -> {
                         when (event.publication.kind) {
