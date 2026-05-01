@@ -99,30 +99,32 @@ jobs:
           echo "=== Creating Fat AAR via Shell Script ==="
           echo "========================================"
 
-          AAR_FILE=$(ls build/outputs/aar/*-release.aar | head -1)
-          echo "[info] Original AAR: $AAR_FILE ($(du -h "$AAR_FILE" | cut -f1))"
+          # 使用绝对路径，避免 cd 导致的路径混乱
+          WORK_DIR="$(pwd)"
+          AAR_FILE="$(ls build/outputs/aar/*-release.aar | head -1)"
+          AAR_ABS="$(realpath "$AAR_FILE")"
 
-          STAGING_DIR="build/fat-aar-staging"
+          echo "[info] Original AAR: $AAR_ABS ($(du -h "$AAR_ABS" | cut -f1))"
+
+          STAGING_DIR="$WORK_DIR/build/fat-aar-staging"
           rm -rf "$STAGING_DIR"
           mkdir -p "$STAGING_DIR"
 
           # ---- 第一步：解压原始 AAR ----
           echo ""
           echo "--- [1/5] Extracting original AAR ---"
-          cd "$STAGING_DIR"
-          unzip -qo "../$AAR_FILE"
-          echo "[ok] Extracted $(ls | wc -l) items"
+          unzip -qo "$AAR_ABS" -d "$STAGING_DIR"
+          echo "[ok] Extracted $(ls "$STAGING_DIR" | wc -l) items"
 
           # ---- 第二步：用 Gradle 导出依赖文件列表 ----
           echo ""
           echo "--- [2/5] Exporting runtime classpath ---"
 
-          cat > ../export-deps.gradle << 'GRADLE_EOF'
+          cat > "$WORK_DIR/export-deps.gradle" << 'GRADLE_EOF'
           tasks.register('exportDeps') {
             doLast {
               def rtc = configurations.findByName('releaseRuntimeClasspath')
               if (rtc == null) {
-                // Fallback: try runtimeClasspath
                 rtc = configurations.findByName('runtimeClasspath')
               }
               if (rtc != null && rtc.canBeResolved) {
@@ -130,7 +132,6 @@ jobs:
                 outFile.text = rtc.files.findAll { it.exists() }.collect { it.absolutePath }.join('\n')
                 println "Exported ${rtc.files.size()} files to dep-files.txt"
               } else {
-                // Last resort: iterate ALL resolvable configs
                 def allFiles = []
                 configurations.findAll { it.canBeResolved }.each { cfg ->
                   try {
@@ -149,7 +150,7 @@ jobs:
           }
           GRADLE_EOF
 
-          cd ..
+          cd "$WORK_DIR"
           ./gradlew exportDeps --no-daemon -q 2>&1 || true
 
           DEP_LIST="build/dep-files.txt"
@@ -186,7 +187,6 @@ jobs:
             DEP_NAME=$(basename "$DEP_PATH")
 
             if [[ "$DEP_NAME" == *.aar ]]; then
-              # AAR 文件 → 解压取 classes.jar
               EXTRACT_TMP="$STAGING_DIR/_extract_$$"
               rm -rf "$EXTRACT_TMP"; mkdir -p "$EXTRACT_TMP"
               unzip -qo "$DEP_PATH" -d "$EXTRACT_TMP"
@@ -206,28 +206,21 @@ jobs:
             fi
           done < "$DEP_LIST"
 
-          # 用 jar 命令合并所有 JAR
+          # 用 jar 命令合并所有 JAR（逐个 unzip + rezip）
           echo ""
           echo "  Merging ${#JAR_SOURCES[@]} JAR files..."
-          cd "$MERGE_DIR"
-
-          # 创建合并后的 classes.jar（用 jar 合并所有 zipfile）
           MERGED_JAR="$STAGING_DIR/classes-merged.jar"
-          # 使用 jar 命令逐个合并
           cp "${JAR_SOURCES[0]}" "$MERGED_JAR"
+
           for ((i=1; i<${#JAR_SOURCES[@]}; i++)); do
-            # 用 unzip+rezip 方式合并（避免 jar 命令参数问题）
-            TMP_MERGE="$STAGING_DIR/_tmp_merge$$"
+            TMP_MERGE="$STAGING_DIR/_tmp_merge_$$"
             mkdir -p "$TMP_MERGE"
-            cd "$TMP_MERGE"
-            unzip -qo "$MERGED_JAR"
-            unzip -qo -o "${JAR_SOURCES[$i]}"
+            unzip -qo "$MERGED_JAR" -d "$TMP_MERGE"
+            unzip -qo -o "${JAR_SOURCES[$i]}" -d "$TMP_MERGE"
             rm -f "$MERGED_JAR"
-            jar cf "$MERGED_JAR" .
-            cd "$MERGE_DIR"
+            (cd "$TMP_MERGE" && jar cf "$MERGED_JAR" .)
             rm -rf "$TMP_MERGE"
           done
-          cd ..
 
           # 替换原 classes.jar
           mv "$STAGING_DIR/classes.jar" "$STAGING_DIR/classes-original.jar" 2>/dev/null || true
@@ -252,11 +245,9 @@ jobs:
             rm -rf "$EXTRACT_SO"; mkdir -p "$EXTRACT_SO"
             unzip -qo "$DEP_PATH" -d "$EXTRACT_SO" 2>/dev/null || true
 
-            # 在多个可能的位置寻找 .so 文件
             for SO_LOC in jni lib jniLibs; do
               SRC_JNI="$EXTRACT_SO/$SO_LOC"
               if [ -d "$SRC_JNI" ]; then
-                # 遍历所有 ABI 子目录，复制 .so
                 while IFS= read -r -d '' SO_FILE; do
                   REL_PATH="${SO_FILE#$SRC_JNI/}"
                   DEST_DIR="$JNI_DIR/$(dirname "$REL_PATH")"
@@ -279,18 +270,16 @@ jobs:
 
           cd "$STAGING_DIR"
           rm -f classes-old.jar classes-original.jar 2>/dev/null || true
+          zip -rq "$AAR_ABS" . -x "classes-old.jar" "classes-original.jar"
 
-          # 打包除旧文件外的所有内容
-          zip -rq "../$AAR_FILE" . -x "classes-old.jar" "classes-original.jar"
-
-          FINAL_SIZE=$(stat -c%s "../$AAR_FILE" 2>/dev/null || stat -f%z "../$AAR_FILE")
+          FINAL_SIZE=$(stat -c%s "$AAR_ABS" 2>/dev/null || stat -f%z "$AAR_ABS")
           FINAL_KB=$((FINAL_SIZE / 1024))
           FINAL_MB=$((FINAL_SIZE / 1024 / 1024))
 
           echo ""
           echo "========================================"
           echo "=== Fat AAR created successfully ==="
-          echo "  File:   $(basename $AAR_FILE)"
+          echo "  File:   $(basename $AAR_ABS)"
           echo "  Size:   ${FINAL_KB} KB (~${FINAL_MB} MB)"
           echo "  Deps:   $DEP_COUNT artifacts"
           echo "  .so:    $SO_TOTAL native libs"
@@ -298,6 +287,7 @@ jobs:
 
           # 清理临时文件
           rm -rf "$STAGING_DIR"
+          rm -f "$WORK_DIR/export-deps.gradle"
 
           # 最终校验
           if [ "$FINAL_SIZE" -lt 5242880 ]; then
@@ -305,11 +295,11 @@ jobs:
             echo "!!! WARNING !!! AAR size suspiciously small (<5MB)!"
             echo "Expected ~20MB+ with LiveKit SDK + WebRTC .so libraries."
             echo ""
-            echo "--- AAR contents (top 30):"
-            unzip -l "../$AAR_FILE" | head -35
+            echo "--- AAR contents (top 35):"
+            unzip -l "$AAR_ABS" | head -35
           fi
 
-          HAS_JNI=$(unzip -l "../$AAR_FILE" 2>/dev/null | grep -c "jni/" || true)
+          HAS_JNI=$(unzip -l "$AAR_ABS" 2>/dev/null | grep -c "jni/" || true)
           if [ "$HAS_JNI" -eq 0 ]; then
             echo ""
             echo "!!! WARNING !!! No jni/ directory in AAR!"
