@@ -251,7 +251,27 @@ jobs:
 
           cd "$STAGING_DIR"
           rm -f classes-old.jar classes-original.jar 2>/dev/null || true
-          zip -rq "$AAR_ABS" . -x "classes-old.jar" "classes-original.jar"
+
+          # 清理合并后的 classes.jar 中可能导致冲突的文件
+          if [ -f classes.jar ]; then
+            echo "  Cleaning conflicting entries from classes.jar..."
+            # 创建临时目录处理 classes.jar
+            CLEAN_DIR="$STAGING_DIR/_clean_jar_$$"
+            mkdir -p "$CLEAN_DIR"
+            (cd "$CLEAN_DIR" && unzip -qo "$STAGING_DIR/classes.jar")
+            # 删除签名文件（避免 SecurityException / 打包冲突）
+            rm -rf "$CLEAN_DIR/META-INF" 2>/dev/null || true
+            # 重新打包
+            (cd "$CLEAN_DIR" && jar cf "$STAGING_DIR/classes.jar" .)
+            rm -rf "$CLEAN_DIR"
+            echo "  [done] Cleaned classes.jar: $(du -h "$STAGING_DIR/classes.jar" | cut -f1)"
+          fi
+
+          # 打包为 AAR（排除临时文件 + 签名相关文件）
+          zip -rq "$AAR_ABS" . \
+            -x "classes-old.jar" "classes-original.jar" \
+            -x "*.SF" "*.RSA" "*.DSA" \
+            -x "META-INF/*.SF" "META-INF/*.RSA" "META-INF/*.DSA"
 
           FINAL_SIZE=$(stat -c%s "$AAR_ABS" 2>/dev/null || stat -f%z "$AAR_ABS")
           FINAL_KB=$((FINAL_SIZE / 1024))
@@ -269,7 +289,31 @@ jobs:
           # 清理临时文件
           rm -rf "$STAGING_DIR"
 
-          # 最终校验
+          # 最终校验 + 诊断输出
+          echo ""
+          echo "========================================"
+          echo "=== Fat AAR Diagnostic Info ==="
+          echo "========================================"
+
+          # 始终输出完整内容列表（方便排查 uni-app 打包问题）
+          echo ""
+          echo "--- Complete AAR structure (top 50 entries) ---"
+          unzip -l "$AAR_ABS" | head -50
+          TOTAL_ENTRIES=$(unzip -l "$AAR_ABS" | tail -1)
+          echo "$TOTAL_ENTRIES"
+          echo ""
+
+          # 检查必要文件
+          echo "--- Required files check ---"
+          for req in AndroidManifest.xml classes.jar; do
+            COUNT=$(unzip -l "$AAR_ABS" 2>/dev/null | grep -c "/${req}$" || true)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "  [OK] $req found"
+            else
+              echo "  [MISSING] $req — THIS WILL CAUSE PACKAGING FAILURE!"
+            fi
+          done
+
           if [ "$FINAL_SIZE" -lt 5242880 ]; then
             echo ""
             echo "!!! WARNING !!! AAR size suspiciously small (<5MB)!"
