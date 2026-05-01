@@ -98,7 +98,47 @@ jobs:
           echo "File sizes:"
           du -h android/build/outputs/aar/*-release.aar 2>&1 || true
           echo "AAR contents (brief):"
-          unzip -l android/build/outputs/aar/*-release.aar 2>&1 | head -20 || true
+          unzip -l android/build/outputs/aar/*-release.aar 2>&1 | head -30 || true
+
+          # ========== Fat AAR 大小校验 ==========
+          echo ""
+          echo "=== Fat AAR size validation ==="
+          AAR_FILE=$(ls android/build/outputs/aar/*-release.aar 2>/dev/null | head -1)
+          if [ -z "$AAR_FILE" ]; then
+            echo "ERROR: No AAR file found!"
+            exit 1
+          fi
+          AAR_SIZE=$(stat -c%s "$AAR_FILE" 2>/dev/null || stat -f%z "$AAR_FILE" 2>/dev/null)
+          AAR_SIZE_KB=$((AAR_SIZE / 1024))
+          AAR_SIZE_MB=$((AAR_SIZE / 1024 / 1024))
+          echo "AAR file: $AAR_FILE"
+          echo "AAR size: ${AAR_SIZE_KB} KB (${AAR_SIZE_MB} MB)"
+
+          # Fat AAR 应该 > 5MB（LiveKit SDK + WebRTC .so 原生库）
+          if [ "$AAR_SIZE" -lt 5242880 ]; then
+            echo ""
+            echo "!!! ERROR !!! AAR too small (${AAR_SIZE_KB} KB)!"
+            echo "Expected >5MB for a valid Fat AAR with LiveKit SDK + native .so libs."
+            echo "This means embedDependencies task FAILED to bundle dependencies."
+            echo "The plugin will crash at runtime without LiveKit classes and WebRTC .so libraries."
+            echo ""
+            echo "--- AAR contents (for debugging) ---"
+            unzip -l "$AAR_FILE" 2>&1 | tail -20
+            exit 1
+          fi
+
+          # 检查 jni 目录是否存在（WebRTC .so 文件标志）
+          HAS_JNI=$(unzip -l "$AAR_FILE" 2>/dev/null | grep -c "jni/" || true)
+          if [ "$HAS_JNI" -eq 0 ]; then
+            echo ""
+            echo "!!! WARNING !!! No jni/ directory found in AAR!"
+            echo "WebRTC .so native libraries may be missing - app will crash on LiveKit.init()"
+          else
+            echo "JNI entries found in AAR: $HAS_JNI"
+          fi
+
+          echo ""
+          echo "=== AAR validation PASSED ==="
 
       - name: Upload Android AAR
         uses: actions/upload-artifact@v4
