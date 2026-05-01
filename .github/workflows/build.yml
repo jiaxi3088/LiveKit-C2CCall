@@ -154,6 +154,8 @@ jobs:
 
       - name: Build iOS Framework
         run: |
+          set -e
+          
           cat > ios/project.yml << 'YML'
           name: LiveKitC2CCall
           options:
@@ -185,8 +187,12 @@ jobs:
           YML
           
           cd ios
+          echo "=== Generating Xcode project ==="
           xcodegen generate
+          echo "=== Generated files ==="
+          ls -la
           
+          echo "=== Building iOS Framework ==="
           xcodebuild \
             -project LiveKitC2CCall.xcodeproj \
             -scheme LiveKitC2CCall \
@@ -202,18 +208,67 @@ jobs:
             CONFIGURATION_BUILD_DIR="$PWD/build" \
             2>&1 | tee build.log
           
-          if [ ! -d "build/LiveKitC2CCall.framework" ]; then
-            echo "=== BUILD FAILED ==="
-            tail -50 build.log
+          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+          echo "=== xcodebuild exit code: $BUILD_EXIT_CODE ==="
+          
+          echo "=== Checking build output ==="
+          ls -laR build/ 2>/dev/null || echo "No build directory!"
+          
+      - name: Verify iOS Framework
+        run: |
+          echo "=== Verifying iOS Framework at ios/build/LiveKitC2CCall.framework ==="
+          if [ ! -d "ios/build/LiveKitC2CCall.framework" ]; then
+            echo "ERROR: Framework directory not found!"
+            echo "--- Last 80 lines of iOS build log ---"
+            tail -80 ios/build.log 2>/dev/null || echo "No build log found"
             exit 1
           fi
+          
+          echo "=== Framework contents ==="
+          ls -laR ios/build/LiveKitC2CCall.framework/
+          
+          # 检查 framework 二进制文件是否存在且非空
+          BINARY="ios/build/LiveKitC2CCall.framework/LiveKitC2CCall"
+          if [ ! -f "$BINARY" ]; then
+            # 尝试其他可能的二进制名称
+            BINARY=$(find ios/build/LiveKitC2CCall.framework -type f -name "LiveKitC2CCall*" ! -name "*.h" 2>/dev/null | head -1)
+          fi
+          
+          if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
+            echo "WARNING: No binary found in framework"
+          else
+            echo "=== Binary file: $BINARY ==="
+            ls -la "$BINARY"
+            file "$BINARY"
+            BINARY_SIZE=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY" 2>/dev/null)
+            echo "Binary size: ${BINARY_SIZE} bytes"
+            if [ "$BINARY_SIZE" -lt 1000 ]; then
+              echo "ERROR: Framework binary suspiciously small (${BINARY_SIZE} bytes)"
+              exit 1
+            fi
+          fi
+          
+          # 检查总大小
+          TOTAL_SIZE=$(du -sk ios/build/LiveKitC2CCall.framework | cut -f1)
+          echo "Total framework size: ${TOTAL_SIZE} KB"
+          if [ "$TOTAL_SIZE" -lt 10 ]; then
+            echo "ERROR: Framework total size too small (${TOTAL_SIZE} KB), likely incomplete"
+            exit 1
+          fi
+          
+          echo "=== iOS Framework verification PASSED ==="
 
       - name: Upload iOS Framework
         uses: actions/upload-artifact@v4
         with:
           name: ios-framework
-          path: ios/build/LiveKitC2CCall.framework
+          path: ios/build/LiveKitC2CCall.framework/
           if-no-files-found: error
+          retention-days: 1
+
+      - name: Confirm iOS upload
+        if: always()
+        run: echo "iOS Framework upload step completed (check above for errors)"
 
   package:
     needs: [build-android, build-ios]
@@ -249,6 +304,46 @@ jobs:
         with:
           name: ios-framework
           path: artifacts/ios/
+
+      - name: Verify iOS Framework download
+        run: |
+          echo "=== Checking downloaded iOS artifact ==="
+          ls -laR artifacts/ios/ 2>/dev/null || { echo "ERROR: ios artifacts directory empty or missing!"; exit 1; }
+          
+          # 检查 framework 目录是否存在（artifact 下载可能展开为内部文件）
+          if [ -d "artifacts/ios/LiveKitC2CCall.framework" ]; then
+            echo "✓ LiveKitC2CCall.framework found"
+          else
+            # 可能 artifact 直接展开了框架内容，尝试重建目录结构
+            echo "Framework directory not found directly. Checking contents..."
+            echo "Files in artifacts/ios/:"
+            find artifacts/ios/ -type f 2>/dev/null | head -20
+            
+            # 如果有 Info.plist 或二进制文件但缺少 .framework 包装
+            if [ -f "artifacts/ios/Info.plist" ] || [ -f "artifacts/ios/LiveKitC2CCall" ]; then
+              echo "Reconstructing .framework structure from flat contents..."
+              mkdir -p artifacts/ios_reconstructed/LiveKitC2CCall.framework/Headers
+              # 移动文件到正确的 framework 结构中
+              if [ -f "artifacts/ios/Info.plist" ]; then
+                mv artifacts/ios/Info.plist artifacts/ios_reconstructed/LiveKitC2CCall.framework/
+              fi
+              if [ -f "artifacts/ios/LiveKitC2CCall" ]; then
+                mv artifacts/ios/LiveKitC2CCall artifacts/ios_reconstructed/LiveKitC2CCall.framework/
+              fi
+              if [ -f "artifacts/ios/Headers/LiveKitC2CCallModule.h" ]; then
+                mv artifacts/ios/Headers artifacts/ios_reconstructed/LiveKitC2CCall.framework/
+              fi
+              rm -rf artifacts/ios
+              mv artifacts/ios_reconstructed artifacts/ios
+              echo "Reconstruction complete:"
+              ls -laR artifacts/ios/
+            else
+              echo "ERROR: Cannot find valid iOS framework content in downloaded artifact!"
+              exit 1
+            fi
+          fi
+          
+          echo "iOS download verification passed"
 
       - name: Assemble plugin package
         run: |
