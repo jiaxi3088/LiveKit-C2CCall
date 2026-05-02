@@ -52,34 +52,5 @@ dependencies {
     compileOnly fileTree(dir: '../libs', include: ['uniapp-v8-release.aar'])
 }
 
-// Fat AAR 由 CI Shell 脚本完成，见 .github/workflows/build.yml 的 "Create Fat AAR" 步骤
-
-// 导出运行时依赖文件列表供 CI Shell 脚本使用
-tasks.register('exportDeps') {
-    doLast {
-        def rtc = configurations.findByName('releaseRuntimeClasspath')
-        if (rtc == null) {
-            rtc = configurations.findByName('runtimeClasspath')
-        }
-        if (rtc != null && rtc.canBeResolved) {
-            def outFile = file("${buildDir}/dep-files.txt")
-            outFile.text = rtc.files.findAll { it.exists() }.collect { it.absolutePath }.join('\n')
-            println "Exported ${rtc.files.size()} files to dep-files.txt"
-        } else {
-            // 回退：扫描所有可解析配置
-            def allFiles = []
-            configurations.findAll { it.canBeResolved }.each { cfg ->
-                try {
-                    cfg.files.each { f ->
-                        if (f.exists() && f.name != 'uniapp-v8-release.aar') {
-                            allFiles.add(f.absolutePath)
-                        }
-                    }
-                } catch(Exception ignored) {}
-            }
-            def outFile = file("${buildDir}/dep-files.txt")
-            outFile.text = allFiles.unique().join('\n')
-            println "Exported ${allFiles.size()} files (fallback mode)"
-        }
-    }
-}
+// Fat AAR 不再需要 — 依赖通过 package.json 的 dependencies 由 HBuilderX Maven 解析
+// 产物为瘦 AAR (~28KB)，仅含插件自身代码

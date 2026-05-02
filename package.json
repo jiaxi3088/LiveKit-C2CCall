@@ -19,7 +19,13 @@
                 "arm64-v8a"
             ],
             "minSdkVersion": "24",
-            "dependencies": [],
+            "dependencies": [
+                "io.livekit:livekit-android:2.25.1",
+                "androidx.appcompat:appcompat:1.6.1",
+                "androidx.core:core-ktx:1.13.1",
+                "androidx.lifecycle:lifecycle-runtime-ktx:2.8.7",
+                "androidx.lifecycle:lifecycle-common:2.8.7"
+            ],
             "permissions": [
                 "android.permission.CAMERA",
                 "android.permission.RECORD_AUDIO",
