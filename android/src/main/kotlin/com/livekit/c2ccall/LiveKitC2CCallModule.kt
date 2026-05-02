@@ -387,19 +387,21 @@ class LiveKitC2CCallModule : UniModule() {
 
         // ===== 策略 4: 反射查找 mUniSDKInstance（旧版兼容，已知在5.x不存在） =====
         try {
-            val field = findField(this@LiveKitC2CCallModule.javaClass.superclass!!, "mUniSDKInstance") ?: return@try
-            field.isAccessible = true
-            val instance = field.get(this@LiveKitC2CCallModule)
-            if (instance != null) {
-                for (methodName in listOf("getContext", "context")) {
-                    try {
-                        val method = instance.javaClass.getMethod(methodName)
-                        val ctx = method.invoke(instance) as? android.content.Context
-                        if (ctx != null) {
-                            Log.d(TAG, "[COMPAT] ✅ 策略4成功: mUniSDKInstance.$methodName()")
-                            return ctx
-                        }
-                    } catch (_: Exception) {}
+            val field = findField(this@LiveKitC2CCallModule.javaClass.superclass!!, "mUniSDKInstance")
+            if (field != null) {
+                field.isAccessible = true
+                val instance = field.get(this@LiveKitC2CCallModule)
+                if (instance != null) {
+                    for (methodName in listOf("getContext", "context")) {
+                        try {
+                            val method = instance.javaClass.getMethod(methodName)
+                            val ctx = method.invoke(instance) as? android.content.Context
+                            if (ctx != null) {
+                                Log.d(TAG, "[COMPAT] ✅ 策略4成功: mUniSDKInstance.$methodName()")
+                                return ctx
+                            }
+                        } catch (_: Exception) {}
+                    }
                 }
             }
         } catch (e: Exception) {
