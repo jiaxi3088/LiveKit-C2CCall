@@ -191,11 +191,34 @@ jobs:
               -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
           fi
 
+          # 最终兜底：搜索任何含 org.webrtc.EglBase 的 AAR
+          if [ -z "$WEBRTC_AAR" ]; then
+            echo "[Step 2b] Broad search: scanning for any AAR with org.webrtc.EglBase..."
+            for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -30); do
+              if unzip -l "$wc" 2>/dev/null | grep -q "org/webrtc/EglBase"; then
+                WEBRTC_AAR="$wc"
+                echo "[Step 2b]   Found EglBase in: $(basename $wc)"
+                break
+              fi
+            done
+          fi
+
           if [ -n "$WEBRTC_AAR" ] && [ -f "$WEBRTC_AAR" ]; then
             unzip -qo "$WEBRTC_AAR" -d "$WEBRTC_DIR" 2>/dev/null || true
             echo "[Step 2b] ✓ WebRTC SDK found: $(basename $WEBRTC_AAR) ($(du -h $WEBRTC_AAR | cut -f1))"
+            # 验证 classes.jar 是否包含关键类
+            if [ -f "$WEBRTC_DIR/classes.jar" ]; then
+              EGL_CHECK=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
+              echo "[Step 2b]   EglBase in classes.jar: $EGL_CHECK"
+              WC_CLASS_COUNT=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "\.class$" | wc -l)
+              echo "[Step 2b]   Total .class files in webrtc: $WC_CLASS_COUNT"
+            else
+              echo "[Step 2b]   ⚠ No classes.jar in android-prefixed AAR!"
+            fi"
           else
-            echo "[Step 2b] ⚠ android-prefixed AAR not found in cache!"
+            echo "[Step 2b] ⚠ android-prefixed AAR NOT found in cache!"
+            echo "[Step 2b]   Video rendering will NOT work without WebRTC classes."
+            echo "[Step 2b]   Audio-only mode will be used as fallback."
           fi
 
           # ---- Step 3: 合并 classes.jar（仅插件代码，不含 LiveKit SDK） ----
@@ -318,6 +341,22 @@ jobs:
 
           # 打包成最终 AAR
           (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
+
+          # 验证：最终 AAR 中是否包含 WebRTC 关键类
+          echo ""
+          echo "[Step 5] Verifying final AAR contents..."
+          FINAL_EGL=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
+          echo "  org/webrtc/EglBase.class: $FINAL_EGL"
+          FINAL_SVR=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/SurfaceViewRenderer" || echo "NOT_FOUND")
+          echo "  org/webrtc/SurfaceViewRenderer.class: $FINAL_SVR"
+          FINAL_WC_COUNT=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/" | wc -l)
+          echo "  Total org.webrtc/* entries: $FINAL_WC_COUNT"
+          if [ "$FINAL_WC_COUNT" -gt 0 ]; then
+            echo "  ✓ WebRTC classes included in AAR"
+          else
+            echo "  ⚠ NO WebRTC classes in AAR! Video rendering will fail at runtime."
+            echo "    HBuilderX must resolve 'io.github.webrtc-sdk:android-prefixed' from package.json dependencies."
+          fi
 
           FAT_SIZE=$(du -h "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | cut -f1)
           CLASSES_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)

@@ -19,6 +19,12 @@ git push origin main
 
 > 同时 Actions 的 Artifacts 中也会保留 3 个临时包（`android-aar`、`ios-framework`、`livekit-c2c-plugin`），有效期 1 天。
 
+## 调试
+
+adb logcat -s LiveKitC2CCall:D DEBUG:E libc:F tombstoned:F
+
+可以看到插件的调试信息
+
 ## 一、插件信息
 
 | 项目 | 值 |
