@@ -90,22 +90,195 @@ jobs:
           echo "AAR file(s):"
           ls -la build/outputs/aar/*-release.aar
 
-      - name: Verify AAR (slim — dependencies via Maven)
+      - name: Create Fat AAR (merge all dependencies)
         working-directory: android
         run: |
-          AAR_FILE="$(ls build/outputs/aar/*-release.aar | head -1)"
-          AAR_SIZE=$(du -h "$AAR_FILE" | cut -f1)
-          echo "=== Slim AAR built ==="
-          echo "  File:  $(basename "$AAR_FILE")"
-          echo "  Size:  $AAR_SIZE"
-          echo "  Note:  LiveKit SDK + .so will be resolved by HBuilderX from package.json dependencies"
-          unzip -l "$AAR_FILE"
+          set -e
+          WORK_DIR=fat-aar-work
+          rm -rf $WORK_DIR && mkdir -p $WORK_DIR
 
-      - name: Upload Android AAR
+          SRC_AAR="$(ls build/outputs/aar/*-release.aar | head -1)"
+          echo "=== Source slim AAR: $(basename $SRC_AAR) ==="
+
+          # ---- Step 1: 解压插件自身 AAR ----
+          cd $WORK_DIR
+          mkdir -p plugin-extract
+          cd plugin-extract
+          unzip -qo "../../$SRC_AAR"
+          cd ..
+
+          # ---- Step 2: 收集所有传递依赖 ----
+          # 使用 Gradle 获取运行时 classpath（含传递依赖）
+          cd ../..
+          DEPS_FILE="$WORK_DIR/deps-runtime.txt"
+          ./gradlew :dependencies --configuration releaseRuntimeClasspath -q 2>/dev/null \
+            | grep -E '^\+?--- ' \
+            | grep -v 'project :' \
+            | grep -v 'unspecified' \
+            | awk '{print $NF}' \
+            | grep -E ':' \
+            > "$DEPS_FILE" || true
+
+          echo "=== Runtime dependencies ==="
+          cat "$DEPS_FILE"
+          echo "(共 $(wc -l < "$DEPS_FILE") 个依赖)"
+
+          # 解析每个依赖的本地路径（从 Gradle cache）
+          mkdir -p $WORK_DIR/deps-jars $WORK_DIR/deps-aars $WORK_DIR/deps-so
+          while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            # 查找 JAR/AAR 文件
+            FOUND=$(find ~/.gradle/caches -path "*${dep//:/*}*" -name "*.jar" -o -path "*${dep//:/*}*" -name "*.aar" 2>/dev/null \
+              | grep -v sources \
+              | grep -v javadoc \
+              | head -1)
+            if [ -n "$FOUND" ]; then
+              case "$FOUND" in
+                *.jar)
+                  cp "$FOUND" "$WORK_DIR/deps-jars/" 2>/dev/null || true
+                  echo "  [JAR] $dep → $(basename $FOUND)"
+                  ;;
+                *.aar)
+                  # 解压 AAR 提取 classes.jar 和 jni
+                  DEP_BASE=$(basename "$FOUND" .aar)
+                  mkdir -p "$WORK_DIR/deps-aars/$DEP_BASE"
+                  cd "$WORK_DIR/deps-aars/$DEP_BASE"
+                  unzip -qo "$FOUND" 2>/dev/null || true
+                  # 提取 classes.jar（如果非空）
+                  if [ -f classes.jar ] && [ -s classes.jar ]; then
+                    :
+                  elif [ -f classes.jar ]; then
+                    rm -f classes.jar  # 空的 classes.jar（如 android-prefixed WebRTC）
+                  fi
+                  cd ../../..
+                  echo "  [AAR] $dep → $DEP_BASE"
+                  ;;
+              esac
+            else
+              echo "  [??]  $dep (未找到文件)"
+            fi
+          done < "$DEPS_FILE"
+
+          # ---- Step 3: 合并所有 classes.jar ----
+          cd $WORK_DIR
+          echo ""
+          echo "=== Step 3: Merging all classes.jar ==="
+          mkdir -p merged-classes
+
+          # 先合并插件自身
+          if [ -f plugin-extract/classes.jar ]; then
+            cd merged-classes
+            unzip -qo ../plugin-extract/classes.jar 2>/dev/null || true
+            cd ..
+            echo "  ✓ plugin classes.jar ($(du -h plugin-extract/classes.jar | cut -f1))"
+          fi
+
+          # 合并依赖 JARs
+          COUNT=0
+          for jar in deps-jars/*.jar; do
+            [ -f "$jar" ] || continue
+            [ -s "$jar" ] || continue
+            cd merged-classes
+            unzip -qo "../$jar" 2>/dev/null || true
+            cd ..
+            COUNT=$((COUNT+1))
+          done
+          echo "  ✓ $COUNT direct JARs merged"
+
+          # 合并依赖 AAR 中提取的 classes.jar
+          ACOUNT=0
+          for aardir in deps-aars/*/; do
+            [ -d "$aardir" ] || continue
+            if [ -f "${aardir}classes.jar" ] && [ -s "${aardir}classes.jar" ]; then
+              cd merged-classes
+              unzip -qo "${aardir}classes.jar" 2>/dev/null || true
+              cd ..
+              ACOUNT=$((ACOUNT+1))
+            fi
+          done
+          echo "  ✓ $ACOUNT AAR classes.jar merged"
+
+          # 打包为合并后的 classes.jar（排除 META-INF 签名和冲突文件）
+          echo ""
+          echo "  Repacking merged classes.jar..."
+          cd merged-classes
+          # 删除签名文件避免冲突
+          rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF 2>/dev/null || true
+          jar cf ../classes-merged.jar .
+          cd ..
+          echo "  ✓ classes-merged.jar: $(du -h classes-merged.jar | cut -f1)"
+
+          # ---- Step 4: 收集所有 .so 原生库 ----
+          echo ""
+          echo "=== Step 4: Collecting .so native libraries ==="
+          SO_COUNT=0
+          # 从依赖 AAR 中提取 .so
+          for aardir in deps-aars/*/; do
+            [ -d "$aardir" ] || continue
+            if [ -d "${aardir}jni" ]; then
+              find "${aardir}jni" -name "*.so" 2>/dev/null | while read so; do
+                REL_PATH="${so#${aardir}jni/}"
+                mkdir -p "jni/$(dirname "$REL_PATH")"
+                cp "$so" "jni/$REL_PATH" 2>/dev/null || true
+                SO_COUNT=$((SO_COUNT+1))
+              done
+            fi
+          done
+          # 从插件自身提取 .so（如果有）
+          if [ -d plugin-extract/jni ]; then
+            find plugin-extract/jni -name "*.so" 2>/dev/null | while read so; do
+              REL_PATH="${so#plugin-extract/jni/}"
+              mkdir -p "jni/$(dirname "$REL_PATH")"
+              cp "$so" "jni/$REL_PATH" 2>/dev/null || true
+              done
+          fi
+          echo "  Collected .so files:"
+          find jni -name "*.so" 2>/dev/null -exec ls -lh {} \; || echo "  (无 .so)"
+
+          # ---- Step 5: 组装最终 Fat AAR ----
+          echo ""
+          echo "=== Step 5: Assembling final Fat AAR ==="
+          FAT_DIR=fat-aar-final
+          mkdir -p $FAT_DIR
+
+          # AndroidManifest.xml（使用插件自身的）
+          cp plugin-extract/AndroidManifest.xml $FAT_DIR/ 2>/dev/null || true
+
+          # 合并后的 classes.jar
+          cp classes-merged.jar $FAT_DIR/classes.jar
+
+          # 所有 .so
+          if [ -d jni ]; then
+            cp -r jni $FAT_DIR/
+          fi
+
+          # R.txt（使用插件自身的）
+          cp plugin-extract/R.txt $FAT_DIR/ 2>/dev/null || true
+
+          # proguard.txt（如果有）
+          cp plugin-extract/proguard.txt $FAT_DIR/proguard.txt 2>/dev/null || true
+
+          # 打包成最终 AAR
+          cd $FAT_DIR
+          jar cf ../../build/outputs/aar/livekit-c2c-fat.aar .
+          cd ../..
+
+          FAT_SIZE=$(du -h build/outputs/aar/livekit-c2c-fat.aar | cut -f1)
+          echo ""
+          echo "========================================="
+          echo "  Fat AAR 构建完成!"
+          echo "  文件: livekit-c2c-fat.aar"
+          echo "  大小: $FAT_SIZE"
+          echo "========================================="
+          echo ""
+          echo "AAR 内容列表:"
+          unzip -l build/outputs/aar/livekit-c2c-fat.aar | tail -30
+
+      - name: Upload Android AAR (Fat)
         uses: actions/upload-artifact@v4
         with:
           name: android-aar
-          path: android/build/outputs/aar/*-release.aar
+          path: android/build/outputs/aar/livekit-c2c-fat.aar
           if-no-files-found: error
           retention-days: 1
 
@@ -296,7 +469,7 @@ jobs:
         run: |
           echo "=== Checking downloaded AAR ==="
           ls -laR artifacts/android/
-          if [ ! -f "artifacts/android/*-release.aar" ] && [ -z "$(ls -A artifacts/android/ 2>/dev/null)" ]; then
+          if [ ! -f "artifacts/android/livekit-c2c-fat.aar" ] && [ -z "$(ls -A artifacts/android/ 2>/dev/null)" ]; then
             echo "ERROR: Android AAR directory is empty or files missing!"
             exit 1
           fi
@@ -351,7 +524,7 @@ jobs:
       - name: Assemble plugin package
         run: |
           mkdir -p android ios
-          cp artifacts/android/*-release.aar android/livekit-c2c.aar
+          cp artifacts/android/livekit-c2c-fat.aar android/livekit-c2c.aar
           cp -R artifacts/ios/LiveKitC2CCall.framework ios/
 
           rm -rf ci-stubs .github

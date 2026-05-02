@@ -97,6 +97,9 @@ class LiveKitC2CCallModule : UniModule() {
                 } catch (e: UnsatisfiedLinkError) {
                     Log.e(TAG, "[DEBUG] ❌ livekit_android so 加载失败: ${e.message}", e)
                     throw Exception("livekit_android native 库未找到: ${e.message}")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[DEBUG] ❌ native 库加载异常: ${t.javaClass.simpleName}: ${t.message}", t)
+                    throw Exception("native 库加载失败: ${t.javaClass.simpleName} - ${t.message}")
                 }
                 Log.d(TAG, "[DEBUG] 步骤3: 调用 LiveKit.init")
                 LiveKit.init(appContext)
@@ -115,7 +118,7 @@ class LiveKitC2CCallModule : UniModule() {
                             Log.d(TAG, "[DEBUG] 收到 RoomEvent: ${event::class.simpleName}")
                             handleRoomEvent(event)
                         }
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         Log.e(TAG, "[DEBUG] ❌ 事件收集协程异常: ${e.message}", e)
                     }
                     Log.d(TAG, "[DEBUG] 事件收集协程结束")
@@ -129,10 +132,10 @@ class LiveKitC2CCallModule : UniModule() {
                 invokeSuccess(callback, "呼叫已发起")
                 announceForAccessibility("正在发起视频通话")
                 Log.d(TAG, "[DEBUG] startC2CVideoCall 全部成功")
-            } catch (e: Exception) {
-                Log.e(TAG, "[DEBUG] ❌ startC2CVideoCall 异常: ${e.javaClass.simpleName}: ${e.message}", e)
-                invokeError(callback, "发起呼叫失败: ${e.message}")
-                sendEvent("onError", "发起呼叫失败: ${e.message}")
+            } catch (e: Throwable) {
+                Log.e(TAG, "[DEBUG] ❌ startC2CVideoCall 崩溃: ${e.javaClass.simpleName}: ${e.message}", e)
+                invokeError(callback, "发起呼叫失败: ${e.javaClass.simpleName} - ${e.message}")
+                sendEvent("onError", "发起呼叫失败: ${e.javaClass.simpleName} - ${e.message}")
             }
         }
     }
@@ -192,7 +195,7 @@ class LiveKitC2CCallModule : UniModule() {
                             Log.d(TAG, "[DEBUG] answerC2C 收到 RoomEvent: ${event::class.simpleName}")
                             handleRoomEvent(event)
                         }
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         Log.e(TAG, "[DEBUG] ❌ answerC2C 事件收集异常: ${e.message}", e)
                     }
                 }
@@ -204,10 +207,10 @@ class LiveKitC2CCallModule : UniModule() {
                 invokeSuccess(callback, "已接听来电")
                 announceForAccessibility("正在接听来电")
                 Log.d(TAG, "[DEBUG] answerC2C 全部成功")
-            } catch (e: Exception) {
-                Log.e(TAG, "[DEBUG] ❌ answerC2CVideoCall 异常: ${e.javaClass.simpleName}: ${e.message}", e)
-                invokeError(callback, "接听失败: ${e.message}")
-                sendEvent("onError", "接听失败: ${e.message}")
+            } catch (e: Throwable) {
+                Log.e(TAG, "[DEBUG] ❌ answerC2CVideoCall 崩溃: ${e.javaClass.simpleName}: ${e.message}", e)
+                invokeError(callback, "接听失败: ${e.javaClass.simpleName} - ${e.message}")
+                sendEvent("onError", "接听失败: ${e.javaClass.simpleName} - ${e.message}")
             }
         }
     }

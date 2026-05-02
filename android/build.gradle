@@ -52,5 +52,5 @@ dependencies {
     compileOnly fileTree(dir: '../libs', include: ['uniapp-v8-release.aar'])
 }
 
-// Fat AAR 不再需要 — 依赖通过 package.json 的 dependencies 由 HBuilderX Maven 解析
-// 产物为瘦 AAR (~28KB)，仅含插件自身代码
+// Fat AAR 方案: CI 中将所有依赖打入最终 AAR（含 LiveKit SDK + WebRTC .so）
+// 产物为 Fat AAR (~30-40MB)，HBuilderX 云打包时无需额外解析 Maven 依赖
