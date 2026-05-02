@@ -90,22 +90,21 @@ jobs:
           echo "AAR file(s):"
           ls -la build/outputs/aar/*-release.aar
 
-      - name: Create Semi-Fat AAR (LiveKit core + .so only)
+      - name: Create Full Fat AAR (LiveKit + WebRTC + .so ALL IN)
         working-directory: android
         run: |
           set -e
 
-          # ====== Semi-Fat AAR: 插件代码 + WebRTC .so 兜底 ======
-          # LiveKit SDK 类 + WebRTC 类 + .so 均由 package.json Maven 依赖提供
-          # 此 AAR 只含: 插件代码 + (可选) WebRTC .so 兜底
-          # 不包含: androidx / kotlin-stdlib / gson / okHttp (HBuilderX基座已自带)
-          # 预期大小: ~5-8MB (vs 全量Fat ~34MB)
+          # ====== Full Fat AAR: 全部依赖自包含 ======
+          # 不再依赖 HBuilderX 解析 Maven 依赖
+          # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC + 所有 .so
+          # 预期大小: ~30-40MB
 
           ANDROID_ROOT="$(pwd)"
-          WORK="$ANDROID_ROOT/semi-fat-work"
+          WORK="$ANDROID_ROOT/fat-aar-work"
           SRC_AAR="$(ls $ANDROID_ROOT/build/outputs/aar/*-release.aar | head -1)"
           
-          echo "=== Semi-Fat AAR Build ==="
+          echo "=== Full Fat AAR Build ==="
           echo "  Source: $(basename $SRC_AAR)"
           echo "  Work:   $WORK"
           
@@ -117,14 +116,13 @@ jobs:
           unzip -qo "$SRC_AAR" -d "$PLUGIN_EXTRACT"
           echo "[Step 1] ✓ Plugin extracted"
 
-          # ---- Step 2: 定位并提取 LiveKit SDK (唯一必需的外部依赖) ----
+          # ---- Step 2: 定位并提取 LiveKit SDK ----
           LIVEKIT_DIR="$WORK/livekit-sdk"
           mkdir -p "$LIVEKIT_DIR"
           GRADLE_CACHE="$HOME/.gradle/caches"
           
           echo "[Step 2] Locating LiveKit SDK in Gradle cache..."
           
-          # 在 Gradle cache 中搜索 livekit-android AAR
           LIVEKIT_AAR=""
           for search_path in \
             "$GRADLE_CACHE/modules-2/files-2.1/io.livekit/livekit-android/2.25.1" \
@@ -135,7 +133,6 @@ jobs:
             [ -n "$CANDIDATE" ] && { LIVEKIT_AAR="$CANDIDATE"; break; }
           done
 
-          # 兜底宽泛搜索
           if [ -z "$LIVEKIT_AAR" ]; then
             LIVEKIT_AAR=$(find "$GRADLE_CACHE" -path "*livekit-android*2.25.1*" \
               -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
@@ -143,34 +140,24 @@ jobs:
 
           if [ -n "$LIVEKIT_AAR" ] && [ -f "$LIVEKIT_AAR" ]; then
             unzip -qo "$LIVEKIT_AAR" -d "$LIVEKIT_DIR" 2>/dev/null || true
-            # 清理空 classes.jar
             if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ ! -s "$LIVEKIT_DIR/classes.jar" ]; then
               rm -f "$LIVEKIT_DIR/classes.jar"
             fi
             echo "[Step 2] ✓ LiveKit SDK found: $(basename $LIVEKIT_AAR) ($(du -h $LIVEKIT_AAR | cut -f1))"
             ls -la "$LIVEKIT_DIR/" 2>/dev/null || true
           else
-            echo "[Step 2] ⚠ LiveKit AAR not found in cache, will try alternative search..."
-            # 尝试直接在 runtime classpath 中查找
-            ./gradlew :printLiveKitPath --quiet 2>/dev/null || true
-            # 最终兜底: 从 releaseRuntimeClasspath 文件中找 livekit 相关的路径
-            if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
-              LIVEKIT_LINE=$(grep -i "livekit" "$ANDROID_ROOT/build/exports/deps-runtime.txt" | head -1)
-              if [ -n "$LIVEKIT_LINE" ] && [ -f "$LIVEKIT_LINE" ]; then
-                LIVEKIT_AAR="$LIVEKIT_LINE"
-                unzip -qo "$LIVEKIT_AAR" -d "$LIVEKIT_DIR" 2>/dev/null || true
-                echo "[Step 2] ✓ LiveKit from exportDeps: $LIVEKIT_AAR"
-              fi
-            fi
+            echo "[Step 2] ✗ FATAL: LiveKit AAR not found!"
+            exit 1
           fi
 
           # ---- Step 2b: 定位并提取 android-prefixed (WebRTC) ----
-          # 关键：LiveKit 的 livekit/org/webrtc/* 类定义 + liblkjingle_peerconnection_so.so 都在这里
           WEBRTC_DIR="$WORK/webrtc-sdk"
           mkdir -p "$WEBRTC_DIR"
 
-          echo "[Step 2b] Locating android-prefixed (WebRTC) in Gradle cache..."
+          echo "[Step 2b] Locating android-prefixed (WebRTC)..."
           WEBRTC_AAR=""
+
+          # 策略1: 精确路径搜索
           for webrtc_search in \
             "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk/android-prefixed/144.7559.01" \
             "$GRADLE_CACHE/modules-2/files-livekit-android/io.github.webrtc-sdk/android-prefixed/144.7559.01"; do
@@ -180,134 +167,136 @@ jobs:
             [ -n "$CANDIDATE" ] && { WEBRTC_AAR="$CANDIDATE"; break; }
           done
 
+          # 策略2: 宽泛版本搜索
           if [ -z "$WEBRTC_AAR" ]; then
             WEBRTC_AAR=$(find "$GRADLE_CACHE" -path "*android-prefixed*144*" \
               -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
           fi
 
-          # 兜底：搜索任何版本的 android-prefixed
+          # 策略3: 搜索任何版本
           if [ -z "$WEBRTC_AAR" ]; then
             WEBRTC_AAR=$(find "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk" \
               -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
           fi
 
-          # 最终兜底：搜索任何含 org.webrtc.EglBase 的 AAR
+          # 策略4: 暴力扫描含 EglBase 的 AAR（限制前50个避免太慢）
           if [ -z "$WEBRTC_AAR" ]; then
-            echo "[Step 2b] Broad search: scanning for any AAR with org.webrtc.EglBase..."
-            for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -30); do
+            echo "[Step 2b] Broad scan for EglBase..."
+            FOUND_CNT=0
+            for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -50); do
               if unzip -l "$wc" 2>/dev/null | grep -q "org/webrtc/EglBase"; then
                 WEBRTC_AAR="$wc"
-                echo "[Step 2b]   Found EglBase in: $(basename $wc)"
+                echo "[Step 2b]   Found: $(basename $wc)"
                 break
               fi
+              FOUND_CNT=$((FOUND_CNT + 1))
             done
+            echo "[Step 2b]   Scanned $FOUND_CNT AARs"
           fi
 
           if [ -n "$WEBRTC_AAR" ] && [ -f "$WEBRTC_AAR" ]; then
             unzip -qo "$WEBRTC_AAR" -d "$WEBRTC_DIR" 2>/dev/null || true
-            echo "[Step 2b] ✓ WebRTC SDK found: $(basename $WEBRTC_AAR) ($(du -h $WEBRTC_AAR | cut -f1))"
-            # 验证 classes.jar 是否包含关键类
+            echo "[Step 2b] ✓ WebRTC found: $(basename $WEBRTC_AAR) ($(du -h $WEBRTC_AAR | cut -f1))"
             if [ -f "$WEBRTC_DIR/classes.jar" ]; then
               EGL_CHECK=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
-              echo "[Step 2b]   EglBase in classes.jar: $EGL_CHECK"
-              WC_CLASS_COUNT=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "\.class$" | wc -l)
-              echo "[Step 2b]   Total .class files in webrtc: $WC_CLASS_COUNT"
+              echo "[Step 2b]   EglBase: $EGL_CHECK"
+              WC_COUNT=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "\.class$" | wc -l)
+              echo "[Step 2b]   WebRTC classes: $WC_COUNT"
             else
-              echo "[Step 2b]   ⚠ No classes.jar in android-prefixed AAR!"
-            fi"
+              echo "[Step 2b]   ⚠ No classes.jar in WebRTC AAR"
+            fi
           else
-            echo "[Step 2b] ⚠ android-prefixed AAR NOT found in cache!"
-            echo "[Step 2b]   Video rendering will NOT work without WebRTC classes."
-            echo "[Step 2b]   Audio-only mode will be used as fallback."
+            echo "[Step 2b] ⚠ WebRTC AAR not found, video may not work"
           fi
 
-          # ---- Step 3: 合并 classes.jar（仅插件代码，不含 LiveKit SDK） ----
-          # LiveKit SDK 类由 package.json 的 Maven 依赖提供（HBuilderX 云打包时自动解析）
-          # 若合并此处会导致 checkReleaseDuplicateClasses 失败
+          # ---- Step 3: 合并全部 classes.jar (Full Fat) ----
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "[Step 3] Merging classes..."
+          echo "[Step 3] Merging ALL classes (Full Fat)..."
 
-          # 插件自身代码
+          # 3a: 插件代码
           if [ -f "$PLUGIN_EXTRACT/classes.jar" ] && [ -s "$PLUGIN_EXTRACT/classes.jar" ]; then
             unzip -qo "$PLUGIN_EXTRACT/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-            echo "  ✓ plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
+            echo "  ✓ Plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 不再合并 LiveKit SDK classes.jar（由 Maven 依赖提供）
-          echo "  ⊘ LiveKit SDK classes skipped (provided by Maven dependency in package.json)"
+          # 3b: LiveKit SDK 类 (Full Fat 核心：不再依赖 Maven!)
+          if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
+            unzip -qo "$LIVEKIT_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+            echo "  ✓ LiveKit SDK classes ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1))"
+          else
+            echo "  ✗ No LiveKit classes.jar!"
+            exit 1
+          fi
 
-          # 合并 android-prefixed (WebRTC) 类 — 兜底：HBuilderX 可能不传递 WebRTC 的类定义
+          # 3c: WebRTC (android-prefixed) 类
           if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
             unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-            echo "  ✓ WebRTC SDK (android-prefixed) classes ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
+            echo "  ✓ WebRTC classes ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
           else
-            echo "  ⚠ No WebRTC classes.jar (relying on Maven dependency)"
+            echo "  ⚠ No WebRTC classes (video rendering unavailable)"
           fi
 
-          # 打包为最终的 classes.jar（清理签名文件）
-          CLASSES_OUT="$WORK/classes-semi-fat.jar"
+          # 打包最终 classes.jar
+          CLASSES_OUT="$WORK/classes-fat.jar"
           (cd "$MERGED_CLASSES" && \
             rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro 2>/dev/null; \
             jar cf "$CLASSES_OUT" . )
-          echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1)"
+          CLASS_CNT=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
+          echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1) ($CLASS_CNT classes)"
 
-          # ---- Step 4: 收集 WebRTC .so 原生库（仅目标 ABI，兜底用） ----
-          # HBuilderX 的 Maven 依赖通常能传递 .so，但作为安全兜底仍然打包
+          # ---- Step 4: 收集所有 .so 原生库 ----
           JNI_OUT="$WORK/jni"
           mkdir -p "$JNI_OUT"
           TARGET_ABIS="armeabi-v7a arm64-v8a"
           echo ""
-          echo "[Step 4] Collecting .so native libraries (abis: $TARGET_ABIS)..."
+          echo "[Step 4] Collecting .so native libraries..."
 
           SO_COUNT=0
+          collect_so_from_aar() {
+            local aar_dir="$1"
+            local label="$2"
+            if [ -d "$aar_dir/jni" ]; then
+              for abi in $TARGET_ABIS; do
+                if [ -d "$aar_dir/jni/$abi" ]; then
+                  mkdir -p "$JNI_OUT/$abi"
+                  cp "$aar_dir/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
+                  ABI_CNT=$(ls "$JNI_OUT/$abi/"*.so 2>/dev/null | wc -l)
+                  SO_COUNT=$((SO_COUNT + ABI_CNT))
+                  [ "$ABI_CNT" -gt 0 ] && echo "  ✓ $abi from $label: $ABI_CNT .so"
+                fi
+              done
+            fi
+          }
 
-          # 从 LiveKit SDK AAR 中提取 .so（Maven 依赖已提供，此为兜底）
-          if [ -d "$LIVEKIT_DIR/jni" ]; then
-            echo "  ⊘ LiveKit jni/ found but skipped (Maven dependency provides it)"
-          fi
+          collect_so_from_aar "$LIVEKIT_DIR" "LiveKit-SDK"
+          collect_so_from_aar "$WEBRTC_DIR" "WebRTC"
 
-          # 从 android-prefixed (WebRTC) AAR 中提取 .so（关键：liblkjingle_peerconnection_so.so）
-          if [ -d "$WEBRTC_DIR/jni" ]; then
-            for abi in $TARGET_ABIS; do
-              if [ -d "$WEBRTC_DIR/jni/$abi" ]; then
-                mkdir -p "$JNI_OUT/$abi"
-                cp "$WEBRTC_DIR/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
-                ABI_SO=$(ls "$JNI_OUT/$abi/"*.so 2>/dev/null | wc -l)
-                echo "  ✓ $abi: $(ls $WEBRTC_DIR/jni/$abi/*.so 2>/dev/null | wc -l) .so files from webrtc-sdk"
-              fi
-            done
-          fi
-
-          # 搜索其他依赖 AAR 中的 .so（WebRTC 通常在 webrtc-android 的 AAR 中）
-          # 遍历 Gradle cache 中可能包含 .so 的 AAR
-          for so_search_dir in \
+          # 额外搜索 Gradle cache 中其他可能含 .so 的依赖
+          for extra_dir in \
             "$GRADLE_CACHE/modules-2/files-2.1/org/webrtc" \
             "$GRADLE_CACHE/modules-2/files-2.1/com/github/webrtc" \
-            "$GRADLE_CACHE/modules-2/files-2.1/io/getstream" \
-            "$GRADLE_CACHE/modules-2/files-2.1/android-prefixed" \
-            "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk"; do
-            [ -d "$so_search_dir" ] || continue
-            # 找到该目录下的所有 AAR 文件
-            while IFS= read -r so_aar; do
-              [ -f "$so_aar" ] || continue
-              SO_TMP="$WORK/so-tmp-extract"
-              rm -rf "$SO_TMP" && mkdir -p "$SO_TMP"
-              unzip -qo "$so_aar" -d "$SO_TMP" 2>/dev/null || true
-              if [ -d "$SO_TMP/jni" ]; then
+            "$GRADLE_CACHE/modules-2/files-2.1/io/getstream"; do
+            [ -d "$extra_dir" ] || continue
+            while IFS= read -r extra_aar; do
+              [ -f "$extra_aar" ] || continue
+              EXTRA_TMP="$WORK/extra-so-tmp"
+              rm -rf "$EXTRA_TMP" && mkdir -p "$EXTRA_TMP"
+              unzip -qo "$extra_aar" -d "$EXTRA_TMP" 2>/dev/null || true
+              if [ -d "$EXTRA_TMP/jni" ]; then
                 for abi in $TARGET_ABIS; do
-                  if [ -d "$SO_TMP/jni/$abi" ] && [ "$(ls $SO_TMP/jni/$abi/*.so 2>/dev/null)" != "" ]; then
+                  if [ -d "$EXTRA_TMP/jni/$abi" ] && [ "$(ls $EXTRA_TMP/jni/$abi/*.so 2>/dev/null)" != "" ]; then
                     mkdir -p "$JNI_OUT/$abi"
-                    cp "$SO_TMP/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
-                    EXTRA=$(ls "$SO_TMP/jni/$abi/"*.so 2>/dev/null | wc -l)
-                    SO_COUNT=$((SO_COUNT + EXTRA))
-                    echo "  ✓ $abi from $(basename $so_aar): +$EXTRA .so"
+                    cp "$EXTRA_TMP/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
+                    EXTRA_CNT=$(ls "$EXTRA_TMP/jni/$abi/"*.so 2>/dev/null | wc -l)
+                    SO_COUNT=$((SO_COUNT + EXTRA_CNT))
+                    echo "  ✓ $abi from $(basename $extra_aar): +$EXTRA_CNT .so"
                   fi
                 done
               fi
-              rm -rf "$SO_TMP"
-            done < <(find "$so_search_dir" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -5)
+              rm -rf "$EXTRA_TMP"
+            done < <(find "$extra_dir" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -5)
           done
 
           echo "  Total .so files: $SO_COUNT"
@@ -315,66 +304,56 @@ jobs:
             find "$JNI_OUT" -name "*.so" -exec ls -lh {} \;
           fi
 
-          # ---- Step 5: 组装 Semi-Fat AAR ----
+          # ---- Step 5: 组装 Full Fat AAR ----
           FAT_FINAL="$WORK/final-aar"
           mkdir -p "$FAT_FINAL"
           echo ""
-          echo "[Step 5] Assembling final Semi-Fat AAR..."
+          echo "[Step 5] Assembling Full Fat AAR..."
 
-          # AndroidManifest.xml
-          [ -f "$PLUGIN_EXTRACT/AndroidManifest.xml" ] && \
-            cp "$PLUGIN_EXTRACT/AndroidManifest.xml" "$FAT_FINAL/"
-
-          # 合并后的 classes.jar
+          [ -f "$PLUGIN_EXTRACT/AndroidManifest.xml" ] && cp "$PLUGIN_EXTRACT/AndroidManifest.xml" "$FAT_FINAL/"
           cp "$CLASSES_OUT" "$FAT_FINAL/classes.jar"
 
-          # .so 原生库
           if [ -d "$JNI_OUT" ] && [ "$(ls -A "$JNI_OUT" 2>/dev/null)" ]; then
             cp -r "$JNI_OUT" "$FAT_FINAL/jni"
           fi
 
-          # R.txt
           [ -f "$PLUGIN_EXTRACT/R.txt" ] && cp "$PLUGIN_EXTRACT/R.txt" "$FAT_FINAL/"
-
-          # proguard.txt
           [ -f "$PLUGIN_EXTRACT/proguard.txt" ] && cp "$PLUGIN_EXTRACT/proguard.txt" "$FAT_FINAL/"
 
-          # 打包成最终 AAR
           (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
 
-          # 验证：最终 AAR 中是否包含 WebRTC 关键类
+          # ---- 验证 ----
           echo ""
-          echo "[Step 5] Verifying final AAR contents..."
+          echo "[Step 6] Verifying final AAR..."
           FINAL_EGL=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
           echo "  org/webrtc/EglBase.class: $FINAL_EGL"
-          FINAL_SVR=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/SurfaceViewRenderer" || echo "NOT_FOUND")
-          echo "  org/webrtc/SurfaceViewRenderer.class: $FINAL_SVR"
-          FINAL_WC_COUNT=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/" | wc -l)
-          echo "  Total org.webrtc/* entries: $FINAL_WC_COUNT"
-          if [ "$FINAL_WC_COUNT" -gt 0 ]; then
-            echo "  ✓ WebRTC classes included in AAR"
-          else
-            echo "  ⚠ NO WebRTC classes in AAR! Video rendering will fail at runtime."
-            echo "    HBuilderX must resolve 'io.github.webrtc-sdk:android-prefixed' from package.json dependencies."
-          fi
+          FINAL_LK=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "io/livekit/" | wc -l)
+          echo "  io.livekit/* entries: $FINAL_LK"
+          FINAL_WC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/" | wc -l)
+          echo "  org.webrtc/* entries: $FINAL_WC"
+          FINAL_SO=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "\.so$" | wc -l)
+          echo "  .so files: $FINAL_SO"
 
           FAT_SIZE=$(du -h "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | cut -f1)
-          CLASSES_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
+          CLS_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
           JNI_SIZE=$(du -sh "$JNI_OUT" 2>/dev/null | cut -f1 || echo "0")
           
           echo ""
           echo "========================================="
-          echo "  Semi-Fat AAR 构建完成!"
+          echo "  Full Fat AAR 构建完成!"
           echo "  文件:    livekit-c2c-fat.aar"
           echo "  总大小:  $FAT_SIZE"
           echo "  其中:"
-          echo "    classes.jar: $CLASSES_SIZE"
-          echo "    jni (.so):   ${JNI_SIZE:-0}"
-          echo "  说明: 插件代码+WebRTC兜底, LiveKit SDK由package.json Maven依赖提供"
+          echo "    classes.jar: $CLS_SIZE ($CLASS_CNT classes)"
+          echo "    jni (.so):   ${JNI_SIZE:-0} ($FINAL_SO files)"
+          echo "  包含:"
+          echo "    - 插件代码 (com.livekit.c2ccall.*)"
+          echo "    - LiveKit SDK (io.livekit.* + livekit.org.*)"
+          [ "$FINAL_WC" -gt 0 ] && echo "    - WebRTC (org.webrtc.*)"
           echo "========================================="
           echo ""
           echo "AAR 内容列表:"
-          unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | tail -40
+          unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | tail -50
 
       - name: Upload Android AAR (Fat)
         uses: actions/upload-artifact@v4

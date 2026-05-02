@@ -25,8 +25,6 @@
             ],
             "minSdkVersion": "24",
             "dependencies": [
-                "io.livekit:livekit-android:2.25.1",
-                "io.github.webrtc-sdk:android-prefixed:144.7559.01",
                 "androidx.appcompat:appcompat:1.6.1",
                 "androidx.core:core-ktx:1.13.1",
                 "androidx.lifecycle:lifecycle-runtime-ktx:2.8.7",
