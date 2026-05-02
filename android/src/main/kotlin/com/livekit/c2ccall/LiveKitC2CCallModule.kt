@@ -82,11 +82,23 @@ class LiveKitC2CCallModule : UniModule() {
                 disconnectRoom()
 
                 Log.d(TAG, "[DEBUG] 步骤2: 获取 Context")
-                val appContext = mUniSDKInstance?.context()?.applicationContext
+                Log.d(TAG, "[DEBUG] 步骤2a: mUniSDKInstance=$mUniSDKInstance")
+                val uniContext = mUniSDKInstance?.context()
+                Log.d(TAG, "[DEBUG] 步骤2b: uniContext=$uniContext")
+                val appContext = uniContext?.applicationContext
                     ?: throw Exception("无法获取 Context")
                 Log.d(TAG, "[DEBUG] 步骤2完成: Context=${appContext.javaClass.simpleName}")
 
-                Log.d(TAG, "[DEBUG] 步骤3: LiveKit.init")
+                Log.d(TAG, "[DEBUG] 步骤3: 准备调用 LiveKit.init")
+                Log.d(TAG, "[DEBUG] 步骤3a: 尝试 System.loadLibrary 检查 so 是否存在")
+                try {
+                    System.loadLibrary("livekit_android")
+                    Log.d(TAG, "[DEBUG] 步骤3a完成: livekit_android so 加载成功")
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.e(TAG, "[DEBUG] ❌ livekit_android so 加载失败: ${e.message}", e)
+                    throw Exception("livekit_android native 库未找到: ${e.message}")
+                }
+                Log.d(TAG, "[DEBUG] 步骤3: 调用 LiveKit.init")
                 LiveKit.init(appContext)
                 Log.d(TAG, "[DEBUG] 步骤3完成: LiveKit.init 成功")
 
