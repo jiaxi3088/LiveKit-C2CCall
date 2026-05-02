@@ -162,7 +162,41 @@ jobs:
             fi
           fi
 
-          # ---- Step 3: 合并 classes.jar（插件 + 仅 LiveKit SDK） ----
+          # ---- Step 2b: 定位并提取 android-prefixed (WebRTC) ----
+          # 关键：LiveKit 的 livekit/org/webrtc/* 类定义 + liblkjingle_peerconnection_so.so 都在这里
+          WEBRTC_DIR="$WORK/webrtc-sdk"
+          mkdir -p "$WEBRTC_DIR"
+
+          echo "[Step 2b] Locating android-prefixed (WebRTC) in Gradle cache..."
+          WEBRTC_AAR=""
+          for webrtc_search in \
+            "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk/android-prefixed/144.7559.01" \
+            "$GRADLE_CACHE/modules-2/files-livekit-android/io.github.webrtc-sdk/android-prefixed/144.7559.01"; do
+            [ -d "$webrtc_search" ] || continue
+            CANDIDATE=$(find "$webrtc_search" -maxdepth 3 -name "android-prefixed*.aar" \
+              ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+            [ -n "$CANDIDATE" ] && { WEBRTC_AAR="$CANDIDATE"; break; }
+          done
+
+          if [ -z "$WEBRTC_AAR" ]; then
+            WEBRTC_AAR=$(find "$GRADLE_CACHE" -path "*android-prefixed*144*" \
+              -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+          fi
+
+          # 兜底：搜索任何版本的 android-prefixed
+          if [ -z "$WEBRTC_AAR" ]; then
+            WEBRTC_AAR=$(find "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk" \
+              -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+          fi
+
+          if [ -n "$WEBRTC_AAR" ] && [ -f "$WEBRTC_AAR" ]; then
+            unzip -qo "$WEBRTC_AAR" -d "$WEBRTC_DIR" 2>/dev/null || true
+            echo "[Step 2b] ✓ WebRTC SDK found: $(basename $WEBRTC_AAR) ($(du -h $WEBRTC_AAR | cut -f1))"
+          else
+            echo "[Step 2b] ⚠ android-prefixed AAR not found in cache!"
+          fi
+
+          # ---- Step 3: 合并 classes.jar（插件 + LiveKit SDK + WebRTC） ----
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
@@ -180,6 +214,14 @@ jobs:
             echo "  ✓ LiveKit SDK classes ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1))"
           else
             echo "  ⚠ No LiveKit classes.jar to merge!"
+          fi
+
+          # 合并 android-prefixed (WebRTC) — 包含 livekit/org/webrtc/* 类定义
+          if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
+            unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+            echo "  ✓ WebRTC SDK (android-prefixed) classes ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
+          else
+            echo "  ⚠ No WebRTC classes.jar to merge!"
           fi
 
           # 打包为最终的 classes.jar（清理签名文件）
@@ -206,7 +248,19 @@ jobs:
                 cp "$LIVEKIT_DIR/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
                 ABI_SO=$(ls "$JNI_OUT/$abi/"*.so 2>/dev/null | wc -l)
                 SO_COUNT=$((SO_COUNT + ABI_SO))
-                echo "  ✓ $abi: $ABI_SO .so files"
+                echo "  ✓ $abi: $ABI_SO .so files from livekit-android"
+              fi
+            done
+          fi
+
+          # 从 android-prefixed (WebRTC) AAR 中提取 .so（关键：liblkjingle_peerconnection_so.so）
+          if [ -d "$WEBRTC_DIR/jni" ]; then
+            for abi in $TARGET_ABIS; do
+              if [ -d "$WEBRTC_DIR/jni/$abi" ]; then
+                mkdir -p "$JNI_OUT/$abi"
+                cp "$WEBRTC_DIR/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
+                ABI_SO=$(ls "$JNI_OUT/$abi/"*.so 2>/dev/null | wc -l)
+                echo "  ✓ $abi: $(ls $WEBRTC_DIR/jni/$abi/*.so 2>/dev/null | wc -l) .so files from webrtc-sdk"
               fi
             done
           fi
@@ -217,7 +271,8 @@ jobs:
             "$GRADLE_CACHE/modules-2/files-2.1/org/webrtc" \
             "$GRADLE_CACHE/modules-2/files-2.1/com/github/webrtc" \
             "$GRADLE_CACHE/modules-2/files-2.1/io/getstream" \
-            "$GRADLE_CACHE/modules-2/files-2.1/android-prefixed"; do
+            "$GRADLE_CACHE/modules-2/files-2.1/android-prefixed" \
+            "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk"; do
             [ -d "$so_search_dir" ] || continue
             # 找到该目录下的所有 AAR 文件
             while IFS= read -r so_aar; do
@@ -284,7 +339,7 @@ jobs:
           echo "  其中:"
           echo "    classes.jar: $CLASSES_SIZE"
           echo "    jni (.so):   ${JNI_SIZE:-0}"
-          echo "  说明: 仅含插件代码+LiveKit SDK, 不含androidx/kotlin等"
+          echo "  说明: 含插件代码+LiveKit SDK+WebRTC SDK, 不含androidx/kotlin等"
           echo "========================================="
           echo ""
           echo "AAR 内容列表:"
