@@ -41,6 +41,9 @@ class LiveKitC2CCallModule : UniModule() {
     // 铃声播放器
     private var ringPlayer: MediaPlayer? = null
 
+    // 视频渲染器（通过 LiveKitVideoView 组件获取）
+    // 不再在 Module 中创建渲染器，而是使用 LiveKitVideoView 组件提供的实例
+    
     // 协程作用域
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -114,6 +117,9 @@ class LiveKitC2CCallModule : UniModule() {
                 room!!.connect(wsURL, token)
                 Log.d(TAG, "[DEBUG] 步骤6完成: room.connect 成功")
 
+                // ===== 步骤7: 初始化视频渲染 + 发布本地媒体 + 订阅远端媒体 =====
+                initMediaAfterConnect()
+                
                 invokeSuccess(callback, "呼叫已发起")
                 announceForAccessibility("正在发起视频通话")
                 Log.d(TAG, "[DEBUG] startC2CVideoCall 全部成功")
@@ -188,6 +194,9 @@ class LiveKitC2CCallModule : UniModule() {
                 Log.d(TAG, "[DEBUG] answerC2C 步骤6: room.connect 开始, wsURL=$wsURL")
                 room!!.connect(wsURL, token)
                 Log.d(TAG, "[DEBUG] answerC2C 步骤6完成: room.connect 成功")
+
+                // ===== 步骤7: 初始化视频渲染 + 发布本地媒体 + 订阅远端媒体 =====
+                initMediaAfterConnect()
 
                 invokeSuccess(callback, "已接听来电")
                 announceForAccessibility("正在接听来电")
@@ -266,6 +275,66 @@ class LiveKitC2CCallModule : UniModule() {
 
         val msg = if ("back" == position) "已切换到后置摄像头" else "已切换到前置摄像头"
         announceForAccessibility(msg)
+    }
+
+    // ======================== 7. 视频渲染器管理 ========================
+
+    /**
+     * JS 调用：确保视频渲染组件就绪并尝试绑定媒体轨道
+     * 
+     * 使用方式：
+     *   1. 在 nvue 页面中放置 <livekit-video-view type="local"> 和 <livekit-video-view type="remote">
+     *   2. 在 startC2CVideoCall / answerC2CVideoCall 成功后调用此方法
+     *   3. 或在 onConnected 事件触发时调用
+     * 
+     * 注意：推荐直接在 nvue 中放置 <livekit-video-view> 组件即可，组件会自动注册。
+     * 此方法主要用于手动触发轨道重新绑定。
+     */
+    @UniJSMethod(uiThread = true)
+    fun initRenderers(callback: UniJSCallback?) {
+        try {
+            // 确保共享 EglBase 已初始化
+            LiveKitVideoView.getSharedEglBase()
+
+            val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
+            val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
+
+            Log.d(TAG, "[RENDER] 渲染组件状态: local=${if (localRenderer != null) "✅" else "⚠️ 未检测到 <livekit-video-view type='local'>"}, remote=${if (remoteRenderer != null) "✅" else "⚠️ 未检测到 <livekit-video-view type='remote'>"}")
+
+            // 绑定已有的媒体轨道到渲染组件
+            scope.launch {
+                try {
+                    val r = room ?: return@launch
+                    
+                    // 绑定本地视频
+                    val localTrack = r.localParticipant.videoTrackPublications.values.firstOrNull()?.track
+                    if (localTrack != null && localRenderer != null) {
+                        localTrack.addSink(localRenderer)
+                        Log.d(TAG, "[RENDER] ✅ 本地视频已绑定到渲染组件")
+                    }
+                    
+                    // 绑定远端视频
+                    r.remoteParticipants.values.forEach { remote ->
+                        val videoTrack = remote.videoTrackPublications.values.firstOrNull()?.track
+                        if (videoTrack != null && remoteRenderer != null) {
+                            videoTrack.addSink(remoteRenderer)
+                            Log.d(TAG, "[RENDER] ✅ 远端视频已绑定到渲染组件")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[RENDER] 绑定轨道失败: ${e.message}")
+                }
+            }
+
+            invokeSuccess(callback, mapOf(
+                "msg" to "ok",
+                "localReady" to (localRenderer != null),
+                "remoteReady" to (remoteRenderer != null)
+            ))
+        } catch (e: Exception) {
+            Log.e(TAG, "[RENDER] ❌ initRenderers 失败: ${e.message}", e)
+            invokeError(callback, "initRenderers 失败: ${e.message}")
+        }
     }
 
     // ======================== 7. 全局事件监听 ========================
@@ -456,9 +525,10 @@ class LiveKitC2CCallModule : UniModule() {
                 sendEvent("onConnected", "通话已接通")
                 announceForAccessibility("通话已接通")
 
-                // 为远端参与者注册事件监听
+                // 为远端参与者注册事件监听 + 订阅其媒体轨道
                 room?.remoteParticipants?.values?.forEach { remote ->
                     observeRemoteParticipant(remote)
+                    subscribeRemoteTracks(remote)
                 }
             }
             is RoomEvent.Disconnected -> {
@@ -468,6 +538,7 @@ class LiveKitC2CCallModule : UniModule() {
             }
             is RoomEvent.ParticipantConnected -> {
                 observeRemoteParticipant(event.participant)
+                subscribeRemoteTracks(event.participant)
             }
             is RoomEvent.ParticipantDisconnected -> {
                 stopRing()
@@ -476,6 +547,74 @@ class LiveKitC2CCallModule : UniModule() {
             }
             else -> {
                 // 其他事件不处理
+            }
+        }
+    }
+
+    /**
+     * 连接成功后：发布本地音视频 + 订阅远端媒体 + 绑定到渲染组件
+     */
+    private fun initMediaAfterConnect() {
+        Log.d(TAG, "[DEBUG] 步骤7: 初始化媒体")
+        val r = room ?: return
+
+        // 7a. 确保共享 EglBase 已初始化（由 LiveKitVideoView 组件管理）
+        LiveKitVideoView.getSharedEglBase()
+        Log.d(TAG, "[DEBUG] 步骤7a: EglBase 就绪")
+
+        // 7b. 发布本地摄像头 + 麦克风轨道
+        scope.launch {
+            try {
+                val local = r.localParticipant
+                // 根据用户传入的视频选项决定是否开启摄像头（默认开启）
+                local.setCameraEnabled(true)
+                Log.d(TAG, "[DEBUG] 步骤7b: 本地摄像头已发布")
+                
+                local.setMicrophoneEnabled(isAudioEnabled)
+                Log.d(TAG, "[DEBUG] 步骤7c: 本地麦克风已发布 (enabled=$isAudioEnabled)")
+            } catch (e: Exception) {
+                Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败: ${e.message}", e)
+                sendEvent("onError", "发布本地媒体失败: ${e.message}")
+            }
+        }
+
+        // 7c. 订阅已存在的远端参与者媒体轨道
+        r.remoteParticipants.values.forEach { remote ->
+            subscribeRemoteTracks(remote)
+        }
+        
+        Log.d(TAG, "[DEBUG] 步骤7完成: 媒体初始化完毕")
+    }
+
+    /**
+     * 订阅远端参与者的音视频轨道并绑定到渲染组件
+     */
+    private fun subscribeRemoteTracks(remote: RemoteParticipant) {
+        scope.launch {
+            try {
+                val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
+                Log.d(TAG, "[MEDIA] 开始订阅远端参与者: ${remote.identity}, 渲染器=${if (remoteRenderer != null) "已就绪" else "⚠️ 未初始化（请在 nvue 中添加 <livekit-video-view type='remote'>）"}")
+                
+                // 订阅视频轨道
+                val videoTrack = remote.videoTrackPublications.values.firstOrNull()?.track
+                if (videoTrack != null && remoteRenderer != null) {
+                    videoTrack.addSink(remoteRenderer)
+                    Log.d(TAG, "[MEDIA] ✅ 远端视频轨道已绑定到渲染组件")
+                    sendEvent("onRemoteVideoReady", "对方视频画面就绪")
+                } else if (videoTrack == null) {
+                    Log.d(TAG, "[MEDIA] ⚠️ 远端暂无视频轨道，等待...")
+                } else if (remoteRenderer == null) {
+                    Log.w(TAG, "[MEDIA] ⚠️ 远端有视频但渲染组件未初始化，请确保 nvue 中有 <livekit-video-view type='remote'>")
+                }
+                
+                // 订阅音频轨道
+                val audioTrack = remote.audioTrackPublications.values.firstOrNull()?.track
+                if (audioTrack != null) {
+                    Log.d(TAG, "[MEDIA] ✅ 远端音频轨道就绪")
+                    sendEvent("onRemoteAudioReady", "对方声音就绪")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[MEDIA] ❌ 订阅远端轨道失败: ${e.message}", e)
             }
         }
     }
@@ -492,6 +631,20 @@ class LiveKitC2CCallModule : UniModule() {
                             TrackKind.VIDEO -> {
                                 sendEvent("onRemoteCameraOn", "对方已开启摄像头")
                                 announceForAccessibility("对方已开启摄像头")
+                                // 尝试立即订阅新发布的视频轨道
+                                scope.launch {
+                                    try {
+                                        val videoTrack = event.publication.track
+                                        val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
+                                        if (videoTrack != null && remoteRenderer != null) {
+                                            videoTrack.addSink(remoteRenderer)
+                                            Log.d(TAG, "[MEDIA] 新发布视频轨道已绑定到渲染组件")
+                                            sendEvent("onRemoteVideoReady", "对方视频画面就绪")
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "[MEDIA] 订阅新视频轨道失败: ${e.message}")
+                                    }
+                                }
                             }
                             TrackKind.AUDIO -> {
                                 sendEvent("onRemoteAudioOn", "对方已开启麦克风")
@@ -546,6 +699,29 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun disconnectRoom() {
         Log.d(TAG, "[DEBUG] disconnectRoom 被调用, room=$room")
+
+        // 从渲染组件解绑视频轨道
+        val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
+        val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
+        
+        scope.launch {
+            try {
+                val r = room ?: return@launch
+                // 解绑本地视频
+                r.localParticipant.videoTrackPublications.values.forEach { pub ->
+                    pub.track?.removeSink(localRenderer)
+                }
+                // 解绑远端视频
+                r.remoteParticipants.values.forEach { remote ->
+                    remote.videoTrackPublications.values.forEach { pub ->
+                        pub.track?.removeSink(remoteRenderer)
+                    }
+                }
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+
         room?.let {
             Log.d(TAG, "[DEBUG] disconnectRoom: 启动异步 disconnect")
             scope.launch {
@@ -648,6 +824,10 @@ class LiveKitC2CCallModule : UniModule() {
         super.onActivityDestroy()
         Log.d(TAG, "[DEBUG] ===== onActivityDestroy =====")
         stopRing()
+
+        // 释放共享 EglBase（由 LiveKitVideoView 组件管理）
+        LiveKitVideoView.releaseSharedEglBase()
+
         disconnectRoom()
         scope.cancel()
         Log.d(TAG, "[DEBUG] onActivityDestroy 完成")

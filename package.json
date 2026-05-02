@@ -11,6 +11,11 @@
                     "type": "module",
                     "name": "LiveKit-C2CCall",
                     "class": "com.livekit.c2ccall.LiveKitC2CCallModule"
+                },
+                {
+                    "type": "component",
+                    "name": "livekit-video-view",
+                    "class": "com.livekit.c2ccall.LiveKitVideoView"
                 }
             ],
             "integrateType": "aar",

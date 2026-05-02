@@ -102,6 +102,8 @@ const LiveKitC2CCall = uni.requireNativePlugin('LiveKit-C2CCall');
 
 ### 3.2 startC2CVideoCall - 发起呼叫
 
+> **连接成功后会自动发布本地摄像头+麦克风，并订阅远端媒体轨道。**
+
 ```javascript
 LiveKitC2CCall.startC2CVideoCall({
   wsURL: "wss://your-livekit-server",
@@ -132,6 +134,8 @@ LiveKitC2CCall.startC2CVideoCall({
 }, (res) => {
   if (res.code === 0) {
     console.log('呼叫已发起:', res.msg);
+    // 建议在 onConnected 后调用 initRenderers 绑定视频渲染
+    LiveKitC2CCall.initRenderers((r) => console.log('渲染器状态:', r));
   } else {
     console.error('发起失败:', res.msg);
   }
@@ -147,11 +151,14 @@ LiveKitC2CCall.answerC2CVideoCall({
   userInfo: { ... },
   callerUserInfo: { ... }
 }, (res) => {
-  console.log(res);
+  if (res.code === 0) {
+    console.log('已接听，绑定视频渲染...');
+    LiveKitC2CCall.initRenderers((r) => console.log('渲染器状态:', r));
+  }
 });
 ```
 
-> 参数结构同 `startC2CVideoCall`
+> 参数结构同 `startC2CVideoCall`，接听后同样自动开启摄像头和麦克风。
 
 ### 3.4 hangupCall - 挂断
 
@@ -180,7 +187,53 @@ LiveKitC2CCall.switchCamera("front");  // 前置
 LiveKitC2CCall.switchCamera("back");   // 后置
 ```
 
-### 3.8 onCallEvent - 全局事件监听（核心）
+### 3.8 initRenderers - 初始化视频渲染（连接成功后调用）
+
+> 在 nvue 页面中放置了 `<livekit-video-view>` 组件后，调用此方法将媒体流绑定到视图上。
+
+```javascript
+// 通常在 startC2CVideoCall/answerC2CVideoCall 成功回调或 onConnected 事件中调用
+LiveKitC2CCall.initRenderers((res) => {
+  console.log('本地渲染器就绪:', res.localReady);
+  console.log('远端渲染器就绪:', res.remoteReady);
+});
+```
+
+返回值：
+```json
+{ "code": 0, "msg": "ok", "localReady": true, "remoteReady": true }
+```
+
+> **注意**：如果 `localReady` 或 `remoteReady` 为 `false`，说明对应类型的 `<livekit-video-view>` 组件未在页面中放置。
+
+### 3.9 视频渲染组件（nvue 原生组件）
+
+> **仅在 nvue 中可用！** vue 页面不支持原生组件标签。
+
+#### 组件标签
+
+```html
+<!-- 远端视频画面（大窗） -->
+<livekit-video-view type="remote" class="remote-video"></livekit-video-view>
+
+<!-- 本地预览画面（小窗/画中画） -->
+<livekit-video-view type="local" class="local-video"></livekit-video-view>
+```
+
+#### 属性
+
+| 属性 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `type` | String | `"remote"` | `"local"` = 本地摄像头预览，`"remote"` = 对方视频 |
+
+#### 使用要点
+
+1. **必须在 `<script>` 中注册组件**（见下方完整示例）
+2. **type="remote"** 的组件会自动显示对方的视频画面
+3. **type="local"** 的组件会自动显示自己的摄像头预览
+4. 组件内部使用 WebRTC `SurfaceViewRenderer`，支持硬件加速缩放
+
+### 3.10 onCallEvent - 全局事件监听（核心）
 
 > **必须在发起/接听前注册！** 回调保持长驻（keepAlive），不会自动释放。
 
@@ -212,6 +265,12 @@ LiveKitC2CCall.onCallEvent((res) => {
       break;
     case "onRemoteAudioOff":
       console.log("对方关闭了麦克风");
+      break;
+    case "onRemoteVideoReady":
+      console.log("对方视频画面就绪");
+      break;
+    case "onRemoteAudioReady":
+      console.log("对方声音就绪");
       break;
     case "onError":
       console.error("异常:", msg);
@@ -249,7 +308,7 @@ LiveKitC2CCall.onCallEvent((res) => {
 
 | event 值 | 触发时机 |
 |-----------|----------|
-| `onConnected` | 连接成功，通话接通 |
+| `onConnected` | 连接成功，通话接通（自动开启摄像头+麦克风） |
 | `onDisconnected` | 连接断开（网络/异常） |
 | `onHangup` | 本地主动挂断后 |
 | `onRemoteHangup` | 对方挂断 |
@@ -257,38 +316,69 @@ LiveKitC2CCall.onCallEvent((res) => {
 | `onRemoteCameraOff` | 对方关闭视频轨道 |
 | `onRemoteAudioOn` | 对方开启音频轨道 |
 | `onRemoteAudioOff` | 对方关闭音频轨道 |
+| `onRemoteVideoReady` | **对方视频流已绑定到渲染组件（画面即将显示）** |
+| `onRemoteAudioReady` | **对方音频流就绪（声音可播放）** |
 | `onError` | 发生错误 |
 
 ---
 
-## 五、完整调用示例
+## 五、完整调用示例（nvue，含视频画面）
 
-```javascript
+> 以下示例使用 nvue 页面 + `<livekit-video-view>` 原生组件显示视频。
+
+```html
 <template>
-  <view class="call-container">
-    <view class="remote-view">
-      <text>{{ remoteStatus }}</text>
+  <div class="call-container">
+    <!-- 远端视频大窗 -->
+    <livekit-video-view 
+      type="remote" 
+      class="remote-video"
+      v-if="isConnected">
+    </livekit-video-view>
+    
+    <!-- 本地预览小窗 -->
+    <livekit-video-view 
+      type="local" 
+      class="local-video"
+      v-if="isConnected">
+    </livekit-video-view>
+    
+    <!-- 状态提示 -->
+    <view class="status-bar" v-if="!isConnected">
+      <text class="status-text">{{ statusText }}</text>
     </view>
-    <view class="local-view"></view>
-    <view class="controls">
-      <button @click="toggleVideo">{{ isVideoOn ? '关闭摄像头' : '打开摄像头' }}</button>
-      <button @click="toggleAudio" style="background:#f00;color:#fff;">{{ isAudioOn ? '静音' : '取消静音' }}</button>
-      <button @click="hangup" style="background:#333;color:#fff;">挂断</button>
-      <button @click="switchCam">切换摄像头</button>
+    
+    <!-- 底部控制栏 -->
+    <view class="controls" v-if="isConnected">
+      <view class="btn btn-camera" :class="{ active: isVideoOn }" @click="toggleVideo">
+        <text>{{ isVideoOn ? '摄像头' : '摄像头关' }}</text>
+      </view>
+      <view class="btn btn-mic" :class="{ active: isAudioOn }" @click="toggleAudio">
+        <text>{{ isAudioOn ? '麦克风' : '静音' }}</text>
+      </view>
+      <view class="btn btn-hangup" @click="hangup">
+        <text>挂断</text>
+      </view>
+      <view class="btn btn-switch" @click="switchCam">
+        <text>切换</text>
+      </view>
     </view>
-  </view>
+  </div>
 </template>
 
 <script>
 const CallPlugin = uni.requireNativePlugin('LiveKit-C2CCall');
 
+// 注册原生视频组件（nvue 必需）
+const LiveKitVideoView = weex.requireModule('livekit-video-view') || {};
+
 export default {
   data() {
     return {
+      isConnected: false,
       isVideoOn: true,
       isAudioOn: true,
-      isFront: true,
-      remoteStatus: '等待连接...'
+      statusText: '正在发起呼叫...',
     };
   },
   onLoad() {
@@ -298,29 +388,64 @@ export default {
   methods: {
     initEventListener() {
       CallPlugin.onCallEvent((res) => {
+        console.log('[Event]', res.event, res.msg);
         switch (res.event) {
           case 'onConnected':
-            this.remoteStatus = '通话中';
+            this.isConnected = true;
+            this.statusText = '通话中';
+            // 连接成功后绑定视频渲染
+            CallPlugin.initRenderers((r) => {
+              console.log('渲染器状态:', r);
+              if (!r.localReady) console.warn('⚠️ 未检测到本地视频组件');
+              if (!r.remoteReady) console.warn('⚠️ 未检测到远端视频组件');
+            });
+            break;
+          case 'onRemoteVideoReady':
+            uni.showToast({ title: '对方画面已显示', icon: 'none' });
+            break;
+          case 'onRemoteAudioReady':
+            console.log('对方声音已就绪');
             break;
           case 'onRemoteHangup':
           case 'onDisconnected':
-            this.remoteStatus = '通话结束';
+            this.isConnected = false;
+            this.statusText = '通话结束';
+            setTimeout(() => uni.navigateBack(), 1500);
+            break;
+          case 'onError':
+            uni.showModal({ content: res.msg, showCancel: false });
             break;
         }
-        uni.showToast({ title: res.event, icon: 'none' });
+        // 显示事件 toast
+        const eventNames = {
+          onConnected: '已接通',
+          onDisconnected: '连接断开',
+          onHangup: '已挂断',
+          onRemoteHangup: '对方挂断',
+          onRemoteCameraOn: '对方开摄像头',
+          onRemoteCameraOff: '对方关摄像头',
+          onRemoteAudioOn: '对方开麦克风',
+          onRemoteAudioOff: '对方关麦克风'
+        };
+        if (eventNames[res.event]) {
+          uni.showToast({ title: eventNames[res.event], icon: 'none' });
+        }
       });
     },
 
     startCall() {
       CallPlugin.startC2CVideoCall({
-        wsURL: 'wss://your-server',
-        token: 'your-token',
-        userInfo: { nickname: '我', identity: 'uid1', avatar: '' },
-        callerUserInfo: { nickname: '对方', identity: 'uid2', avatar: '' },
-        videoOptions: { position: 'front', encoding: 'QHD' }
+        wsURL: 'wss://srs.easywza.com:4431',
+        token: 'your-token-here',
+        userInfo: { nickname: '盲友', identity: 'uid1_blinder', avatar: '' },
+        callerUserInfo: { nickname: '志愿者', identity: 'uid1_volenteer', avatar: '' },
+        videoOptions: { position: 'back', encoding: 'HD' }
       }, (res) => {
         if (res.code !== 0) {
+          this.statusText = '呼叫失败';
           uni.showModal({ content: res.msg, showCancel: false });
+        } else {
+          this.statusText = '等待对方接听...';
         }
       });
     },
@@ -336,8 +461,8 @@ export default {
     },
 
     switchCam() {
-      this.isFront = !this.isFront;
       CallPlugin.switchCamera(this.isFront ? 'front' : 'back');
+      this.isFront = !this.isFront;
     },
 
     hangup() {
@@ -352,11 +477,31 @@ export default {
 </script>
 
 <style scoped>
-.call-container { flex:1; background:#000; display:flex; flex-direction:column; }
-.remote-view { flex:1; display:flex; align-items:center; justify-content:center; color:#fff; }
-.local-view { position:absolute; top:20rpx; right:20rpx; width:240rpx; height:320rpx; border-radius:12rpx; overflow:hidden; }
-.controls { padding:20rpx; display:flex; justify-content:space-around; }
-.controls button { font-size:28rpx; padding:16rpx 32rpx; border-radius:50%; width:auto; }
+.call-container { flex:1; background:#000; position:relative; }
+.remote-video { flex:1; }
+.local-video { 
+  position:absolute; top:20; right:20; width:240; height:320; 
+  border-radius:12; overflow:hidden; border-color:rgba(255,255,255,0.3); border-width:1;
+}
+.status-bar { 
+  flex:1; display:flex; align-items:center; justify-content:center; 
+}
+.status-text { color:#fff; font-size:32; }
+.controls { 
+  height:120; background:rgba(0,0,0,0.7); 
+  flex-direction:row; justify-content:space-around; align-items:center;
+}
+.btn { 
+  padding-top:16; padding-bottom:16; padding-left:32; padding-right:32;
+  border-radius:50; 
+}
+.btn-camera { background:#2196F3; }
+.btn-camera.active { background:#1565C0; }
+.btn-mic { background:#4CAF50; }
+.btn-mic.active { background:#2E7D32; }
+.btn-hangup { background:#F44336; }
+.btn-switch { background:#607D8B; }
+.btn text { color:#fff; font-size:26; text-align:center; }
 </style>
 ```
 
@@ -415,4 +560,4 @@ export default {
 
 ---
 
-*最后更新时间：2026-05-01（已验证 GitHub Actions 编译产物）*
+*最后更新时间：2026-05-02（新增视频渲染组件 + 媒体轨道自动发布/订阅）*
