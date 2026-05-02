@@ -2,6 +2,7 @@ package com.livekit.c2ccall
 
 import android.content.Context
 import android.media.MediaPlayer
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import io.dcloud.feature.uniapp.annotation.UniJSMethod
@@ -28,6 +29,10 @@ import kotlinx.coroutines.launch
  */
 class LiveKitC2CCallModule : UniModule() {
 
+    companion object {
+        private const val TAG = "LiveKitC2CCall"
+    }
+
     private var room: Room? = null
     private var eventCallback: UniJSCallback? = null
     private var isVideoEnabled = true
@@ -43,6 +48,7 @@ class LiveKitC2CCallModule : UniModule() {
 
     @UniJSMethod(uiThread = true)
     fun startC2CVideoCall(options: Map<String, Any>?, callback: UniJSCallback?) {
+        Log.d(TAG, "[DEBUG] startC2CVideoCall 被调用")
         if (options == null) {
             invokeError(callback, "参数不能为空")
             return
@@ -50,6 +56,7 @@ class LiveKitC2CCallModule : UniModule() {
 
         val wsURL = options["wsURL"] as? String ?: ""
         val token = options["token"] as? String ?: ""
+        Log.d(TAG, "[DEBUG] wsURL=$wsURL, token长度=${token.length}")
 
         if (wsURL.isEmpty() || token.isEmpty()) {
             invokeError(callback, "wsURL 和 token 不能为空")
@@ -61,6 +68,7 @@ class LiveKitC2CCallModule : UniModule() {
         @Suppress("UNCHECKED_CAST")
         val audioOpts = options["audioOptions"] as? Map<String, Any>
         val callRing = options["callRing"] as? String
+        Log.d(TAG, "[DEBUG] videoOpts=$videoOpts, audioOpts=${audioOpts != null}, callRing=$callRing")
 
         parseAudioPublishOptions(audioOpts)
 
@@ -68,30 +76,49 @@ class LiveKitC2CCallModule : UniModule() {
         playRing(callRing)
 
         scope.launch {
+            Log.d(TAG, "[DEBUG] 协程开始执行")
             try {
+                Log.d(TAG, "[DEBUG] 步骤1: disconnectRoom")
                 disconnectRoom()
 
+                Log.d(TAG, "[DEBUG] 步骤2: 获取 Context")
                 val appContext = mUniSDKInstance?.context()?.applicationContext
                     ?: throw Exception("无法获取 Context")
+                Log.d(TAG, "[DEBUG] 步骤2完成: Context=${appContext.javaClass.simpleName}")
 
-                // 初始化 LiveKit（必须在使用前调用）
+                Log.d(TAG, "[DEBUG] 步骤3: LiveKit.init")
                 LiveKit.init(appContext)
+                Log.d(TAG, "[DEBUG] 步骤3完成: LiveKit.init 成功")
 
+                Log.d(TAG, "[DEBUG] 步骤4: LiveKit.create")
                 room = LiveKit.create(appContext)
+                Log.d(TAG, "[DEBUG] 步骤4完成: Room 创建成功, room=$room")
 
+                Log.d(TAG, "[DEBUG] 步骤5: 启动事件收集协程")
                 // 在单独协程中收集房间事件（通过 EventListenable.events 获取 SharedFlow，使用标准 Flow.collect）
                 scope.launch {
-                    room!!.events.events.collect { event: RoomEvent ->
-                        handleRoomEvent(event)
+                    Log.d(TAG, "[DEBUG] 事件收集协程启动")
+                    try {
+                        room?.events?.events?.collect { event: RoomEvent ->
+                            Log.d(TAG, "[DEBUG] 收到 RoomEvent: ${event::class.simpleName}")
+                            handleRoomEvent(event)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[DEBUG] ❌ 事件收集协程异常: ${e.message}", e)
                     }
+                    Log.d(TAG, "[DEBUG] 事件收集协程结束")
                 }
 
+                Log.d(TAG, "[DEBUG] 步骤6: room.connect 开始, wsURL=$wsURL")
                 // 连接到房间（suspend fun，会挂起直到断开连接）
                 room!!.connect(wsURL, token)
+                Log.d(TAG, "[DEBUG] 步骤6完成: room.connect 成功")
 
                 invokeSuccess(callback, "呼叫已发起")
                 announceForAccessibility("正在发起视频通话")
+                Log.d(TAG, "[DEBUG] startC2CVideoCall 全部成功")
             } catch (e: Exception) {
+                Log.e(TAG, "[DEBUG] ❌ startC2CVideoCall 异常: ${e.javaClass.simpleName}: ${e.message}", e)
                 invokeError(callback, "发起呼叫失败: ${e.message}")
                 sendEvent("onError", "发起呼叫失败: ${e.message}")
             }
@@ -102,6 +129,7 @@ class LiveKitC2CCallModule : UniModule() {
 
     @UniJSMethod(uiThread = true)
     fun answerC2CVideoCall(options: Map<String, Any>?, callback: UniJSCallback?) {
+        Log.d(TAG, "[DEBUG] answerC2CVideoCall 被调用")
         if (options == null) {
             invokeError(callback, "参数不能为空")
             return
@@ -109,6 +137,7 @@ class LiveKitC2CCallModule : UniModule() {
 
         val wsURL = options["wsURL"] as? String ?: ""
         val token = options["token"] as? String ?: ""
+        Log.d(TAG, "[DEBUG] wsURL=$wsURL, token长度=${token.length}")
 
         if (wsURL.isEmpty() || token.isEmpty()) {
             invokeError(callback, "wsURL 和 token 不能为空")
@@ -127,30 +156,44 @@ class LiveKitC2CCallModule : UniModule() {
         playRing(answerRing)
 
         scope.launch {
+            Log.d(TAG, "[DEBUG] answerC2C 协程开始执行")
             try {
+                Log.d(TAG, "[DEBUG] answerC2C 步骤1: disconnectRoom")
                 disconnectRoom()
 
+                Log.d(TAG, "[DEBUG] answerC2C 步骤2: 获取 Context")
                 val appContext = mUniSDKInstance?.context()?.applicationContext
                     ?: throw Exception("无法获取 Context")
 
-                // 初始化 LiveKit（必须在使用前调用）
+                Log.d(TAG, "[DEBUG] answerC2C 步骤3: LiveKit.init")
                 LiveKit.init(appContext)
 
+                Log.d(TAG, "[DEBUG] answerC2C 步骤4: LiveKit.create")
                 room = LiveKit.create(appContext)
+                Log.d(TAG, "[DEBUG] answerC2C 步骤4完成: Room 创建成功")
 
-                // 在单独协程中收集房间事件
+                Log.d(TAG, "[DEBUG] answerC2C 步骤5: 启动事件收集协程")
                 scope.launch {
-                    room!!.events.events.collect { event: RoomEvent ->
-                        handleRoomEvent(event)
+                    Log.d(TAG, "[DEBUG] answerC2C 事件收集协程启动")
+                    try {
+                        room?.events?.events?.collect { event: RoomEvent ->
+                            Log.d(TAG, "[DEBUG] answerC2C 收到 RoomEvent: ${event::class.simpleName}")
+                            handleRoomEvent(event)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[DEBUG] ❌ answerC2C 事件收集异常: ${e.message}", e)
                     }
                 }
 
-                // 连接到房间（suspend fun，会挂起直到断开连接）
+                Log.d(TAG, "[DEBUG] answerC2C 步骤6: room.connect 开始, wsURL=$wsURL")
                 room!!.connect(wsURL, token)
+                Log.d(TAG, "[DEBUG] answerC2C 步骤6完成: room.connect 成功")
 
                 invokeSuccess(callback, "已接听来电")
                 announceForAccessibility("正在接听来电")
+                Log.d(TAG, "[DEBUG] answerC2C 全部成功")
             } catch (e: Exception) {
+                Log.e(TAG, "[DEBUG] ❌ answerC2CVideoCall 异常: ${e.javaClass.simpleName}: ${e.message}", e)
                 invokeError(callback, "接听失败: ${e.message}")
                 sendEvent("onError", "接听失败: ${e.message}")
             }
@@ -161,12 +204,12 @@ class LiveKitC2CCallModule : UniModule() {
 
     @UniJSMethod(uiThread = false)
     fun hangupCall() {
-        // 播放挂断铃声
-        val hungupRing = "hungupRing"
+        Log.d(TAG, "[DEBUG] hangupCall 被调用")
         stopRing()
         sendEvent("onHangup", "已挂断")
         disconnectRoom()
         announceForAccessibility("通话已挂断")
+        Log.d(TAG, "[DEBUG] hangupCall 完成")
     }
 
     // ======================== 4. 开关摄像头 ========================
@@ -229,6 +272,7 @@ class LiveKitC2CCallModule : UniModule() {
 
     @UniJSMethod(uiThread = true)
     fun onCallEvent(callback: UniJSCallback?) {
+        Log.d(TAG, "[DEBUG] onCallEvent 注册回调")
         this.eventCallback = callback
     }
 
@@ -333,9 +377,16 @@ class LiveKitC2CCallModule : UniModule() {
      * 断开房间连接
      */
     private fun disconnectRoom() {
+        Log.d(TAG, "[DEBUG] disconnectRoom 被调用, room=$room")
         room?.let {
+            Log.d(TAG, "[DEBUG] disconnectRoom: 启动异步 disconnect")
             scope.launch {
-                it.disconnect()
+                try {
+                    it.disconnect()
+                    Log.d(TAG, "[DEBUG] disconnectRoom: disconnect 成功")
+                } catch (e: Exception) {
+                    Log.e(TAG, "[DEBUG] ❌ disconnectRoom 异常: ${e.message}", e)
+                }
             }
         }
         room = null
@@ -388,6 +439,7 @@ class LiveKitC2CCallModule : UniModule() {
      * 发送事件到 JS 回调
      */
     private fun sendEvent(event: String, msg: String) {
+        Log.d(TAG, "[DEBUG] sendEvent: $event - $msg")
         eventCallback?.invoke(mapOf("event" to event, "msg" to msg))
     }
 
@@ -426,8 +478,10 @@ class LiveKitC2CCallModule : UniModule() {
 
     override fun onActivityDestroy() {
         super.onActivityDestroy()
+        Log.d(TAG, "[DEBUG] ===== onActivityDestroy =====")
         stopRing()
         disconnectRoom()
         scope.cancel()
+        Log.d(TAG, "[DEBUG] onActivityDestroy 完成")
     }
 }
