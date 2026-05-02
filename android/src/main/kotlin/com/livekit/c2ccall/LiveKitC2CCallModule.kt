@@ -293,59 +293,166 @@ class LiveKitC2CCallModule : UniModule() {
     /**
      * 兼容 uni-app 5.x / HBuilderX 5.x 获取 Application Context
      *
-     * 5.x 已移除 mUniSDKInstance 字段，改用 getContext() 或 UniSDKInstanceManager
+     * 5.x 已移除 mUniSDKInstance 字段，按优先级尝试多种方式获取
      */
     private fun getApplicationCompatible(): android.content.Context? {
-        return try {
-            // 方案1：优先尝试 uni-app 5.x 新 API (UniSDKInstanceManager)
-            val managerClass = Class.forName("io.dcloud.feature.uniapp.common.UniSDKInstanceManager")
-            val getCurrentMethod = managerClass.getMethod("getCurrentInstance")
-            val instance = getCurrentMethod.invoke(null)
-            if (instance != null) {
-                val getContextMethod = instance.javaClass.getMethod("getContext")
-                val ctx = getContextMethod.invoke(instance) as? android.content.Context
-                if (ctx != null) return ctx.applicationContext
-            }
-            null
-        } catch (e: Exception) {
-            Log.w(TAG, "[COMPAT] UniSDKInstanceManager 获取失败，尝试 fallback: ${e.message}")
-            tryFallbackContext()
-        }
+        val ctx = detectCompatibleContext()
+        return ctx?.applicationContext
     }
 
     /**
      * 兼容 uni-app 5.x 获取 Context（非 Application 级别）
      */
     private fun getCompatibleContext(): android.content.Context? {
-        return try {
-            val managerClass = Class.forName("io.dcloud.feature.uniapp.common.UniSDKInstanceManager")
-            val getCurrentMethod = managerClass.getMethod("getCurrentInstance")
-            val instance = getCurrentMethod.invoke(null)
-            if (instance != null) {
-                val getContextMethod = instance.javaClass.getMethod("getContext")
-                getContextMethod.invoke(instance) as? android.content.Context
-            } else null
-        } catch (e: Exception) {
-            Log.w(TAG, "[COMPAT] 获取 Context 失败: ${e.message}")
-            tryFallbackContext()
-        }
+        return detectCompatibleContext()
     }
 
     /**
-     * Fallback：通过反射获取 mUniSDKInstance（兼容旧版 uni-app SDK）
+     * 核心探测方法：依次尝试所有已知的 uni-app SDK 获取 Context 方式
+     */
+    private fun detectCompatibleContext(): android.content.Context? {
+        // ===== 策略 1: UniModule 自身是否有 getContext() 方法 =====
+        try {
+            val method = this@LiveKitC2CCallModule.javaClass.getMethod("getContext")
+            val result = method.invoke(this@LiveKitC2CCallModule)
+            if (result is android.content.Context) {
+                Log.d(TAG, "[COMPAT] ✅ 策略1成功: UniModule.getContext()")
+                return result
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "[COMPAT] 策略1失败 (UniModule.getContext()): ${e::class.simpleName}")
+        }
+        // 也尝试父类
+        try {
+            val method = this@LiveKitC2CCallModule.javaClass.superclass?.getMethod("getContext")
+            if (method != null) {
+                val result = method.invoke(this@LiveKitC2CCallModule)
+                if (result is android.content.Context) {
+                    Log.d(TAG, "[COMPAT] ✅ 策略1b成功: super.getContext()")
+                    return result
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "[COMPAT] 策略1b失败 (super.getContext()): ${e::class.simpleName}")
+        }
+
+        // ===== 策略 2: UniModule 是否有 mContext 字段 =====
+        for (fieldName in listOf("mContext", "context", "mBaseContext")) {
+            try {
+                val field = findField(this@LiveKitC2CCallModule.javaClass, fieldName)
+                field?.isAccessible = true
+                val result = field?.get(this@LiveKitC2CCallModule)
+                if (result is android.content.Context) {
+                    Log.d(TAG, "[COMPAT] ✅ 策略2成功: 字段 $fieldName")
+                    return result
+                }
+            } catch (e: Exception) {
+                // continue
+            }
+        }
+
+        // ===== 策略 3: UniSDKInstanceManager (多种可能的类路径) =====
+        val managerClassNames = listOf(
+            "io.dcloud.feature.uniapp.common.UniSDKInstanceManager",
+            "io.dcloud.feature.uniapp.UniSDKInstanceManager",
+            "io.dcloud.common.core.UniSDKInstanceManager"
+        )
+        val methodNames = listOf("getCurrentInstance", "getInstance", "currentInstance")
+
+        for (className in managerClassNames) {
+            try {
+                val mgr = Class.forName(className)
+                for (methodName in methodNames) {
+                    try {
+                        val method = mgr.getMethod(methodName)
+                        val instance = method.invoke(null)
+                        if (instance != null) {
+                            for (ctxMethod in listOf("getContext", "context")) {
+                                try {
+                                    val m = instance.javaClass.getMethod(ctxMethod)
+                                    val ctx = m.invoke(instance) as? android.content.Context
+                                    if (ctx != null) {
+                                        Log.d(TAG, "[COMPAT] ✅ 策略3成功: $className.$methodName().$ctxMethod()")
+                                        return ctx
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "[COMPAT] 策略3: 类 $className 不存在 (${e::class.simpleName})")
+            }
+        }
+
+        // ===== 策略 4: 反射查找 mUniSDKInstance（旧版兼容，已知在5.x不存在） =====
+        try {
+            val field = findField(this@LiveKitC2CCallModule.javaClass.superclass!!, "mUniSDKInstance")
+            field.isAccessible = true
+            val instance = field.get(this@LiveKitC2CCallModule)
+            if (instance != null) {
+                for (methodName in listOf("getContext", "context")) {
+                    try {
+                        val method = instance.javaClass.getMethod(methodName)
+                        val ctx = method.invoke(instance) as? android.content.Context
+                        if (ctx != null) {
+                            Log.d(TAG, "[COMPAT] ✅ 策略4成功: mUniSDKInstance.$methodName()")
+                            return ctx
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "[COMPAT] 策略4失败: ${e::class.simpleName}")
+        }
+
+        // ===== 策略 5: 列出 UniModule 所有可用方法和字段（诊断） =====
+        logAvailableMembers()
+
+        Log.e(TAG, "[COMPAT] ❌ 所有策略均无法获取 Context！")
+        return null
+    }
+
+    /**
+     * 递归查找字段（含父类）
      */
     @Suppress("UNCHECKED_CAST")
-    private fun tryFallbackContext(): android.content.Context? {
-        return try {
-            val field = this@LiveKitC2CCallModule.javaClass.superclass?.declaredFields
-                ?.first { it.name == "mUniSDKInstance" }
-            field?.isAccessible = true
-            val instance = field?.get(this@LiveKitC2CCallModule) ?: return null
-            val getContextMethod = instance.javaClass.getMethod("getContext")
-            getContextMethod.invoke(instance) as? android.content.Context
+    private fun findField(clazz: Class<*>, fieldName: String): java.lang.reflect.Field? {
+        var current: Class<*>? = clazz
+        while (current != null && current != Any::class.java) {
+            try {
+                return current.getDeclaredField(fieldName)
+            } catch (_: Exception) {}
+            current = current.superclass
+        }
+        return null
+    }
+
+    /**
+     * 诊断：列出 UniModule 上所有可用成员，帮助定位正确的 API
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun logAvailableMembers() {
+        try {
+            val clazz = this@LiveKitC2CCallModule.javaClass.superclass ?: return
+            Log.w(TAG, "[COMPAT] === 诊断信息 ===")
+            Log.w(TAG, "[COMPAT] UniModule 实际类: ${clazz.name}")
+
+            val methods = clazz.declaredMethods.map { "${it.name}(${it.parameterTypes.joinToString(",") { it.simpleName }})" }
+            Log.w(TAG, "[COMPAT] UniModule 方法列表 [${methods.size}]:")
+            methods.forEach { Log.w(TAG, "[COMPAT]   - $it")")
+
+            val parentMethods = clazz.superclass?.declaredMethods?.map { it.name }?.distinct()
+            Log.w(TAG, "[COMPAT] 父类方法 [${parentMethods?.size}]: ${parentMethods?.joinToString(", ")}")
+
+            val fields = clazz.declaredFields.map { "${it.type.simpleName} ${it.name}" }
+            Log.w(TAG, "[COMPAT] UniModule 字段列表 [${fields.size}]: ${fields.joinToString(", ")}")
+
+            val parentFields = clazz.superclass?.declaredFields?.map { "${it.type.simpleName} ${it.name}" }
+            Log.w(TAG, "[COMPAT] 父类字段: ${parentFields?.joinToString(", ")}")
+            Log.w(TAG, "[COMPAT] === 诊断结束 ===")
         } catch (e: Exception) {
-            Log.e(TAG, "[COMPAT] Fallback 也失败: ${e.message}")
-            null
+            Log.e(TAG, "[COMPAT] 诊断失败: ${e.message}")
         }
     }
 
