@@ -98,7 +98,8 @@ class LiveKitVideoView @JvmOverloads constructor(
                 val eglContext = eglContextField.get(eglBase)
 
                 // renderer.init(eglBase.eglBaseContext, null)
-                val initMethod = renderer.javaClass.getMethod("init", eglContext.javaClass, Class.forName("org.webrtc.RendererCommon$RendererEvents"))
+                val rendererEventsClsName = "org.webrtc.RendererCommon\$RendererEvents"
+                val initMethod = renderer.javaClass.getMethod("init", eglContext.javaClass, Class.forName(rendererEventsClsName))
                 initMethod.invoke(renderer, eglContext, null)
 
                 // setScalingType(SCALE_ASPECT_FIT)
