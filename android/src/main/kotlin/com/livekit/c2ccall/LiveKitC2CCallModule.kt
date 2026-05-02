@@ -387,7 +387,7 @@ class LiveKitC2CCallModule : UniModule() {
 
         // ===== 策略 4: 反射查找 mUniSDKInstance（旧版兼容，已知在5.x不存在） =====
         try {
-            val field = findField(this@LiveKitC2CCallModule.javaClass.superclass!!, "mUniSDKInstance")
+            val field = findField(this@LiveKitC2CCallModule.javaClass.superclass!!, "mUniSDKInstance") ?: return@try
             field.isAccessible = true
             val instance = field.get(this@LiveKitC2CCallModule)
             if (instance != null) {
