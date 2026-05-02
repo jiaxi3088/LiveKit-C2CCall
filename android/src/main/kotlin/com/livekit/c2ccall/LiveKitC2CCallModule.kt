@@ -86,19 +86,7 @@ class LiveKitC2CCallModule : UniModule() {
                     ?: throw Exception("无法获取 Context")
                 Log.d(TAG, "[DEBUG] 步骤2完成: Context=${appContext.javaClass.simpleName}")
 
-                Log.d(TAG, "[DEBUG] 步骤3: 准备调用 LiveKit.init")
-                Log.d(TAG, "[DEBUG] 步骤3a: 尝试 System.loadLibrary 检查 so 是否存在")
-                try {
-                    System.loadLibrary("livekit_android")
-                    Log.d(TAG, "[DEBUG] 步骤3a完成: livekit_android so 加载成功")
-                } catch (e: UnsatisfiedLinkError) {
-                    Log.e(TAG, "[DEBUG] ❌ livekit_android so 加载失败: ${e.message}", e)
-                    throw Exception("livekit_android native 库未找到: ${e.message}")
-                } catch (t: Throwable) {
-                    Log.e(TAG, "[DEBUG] ❌ native 库加载异常: ${t.javaClass.simpleName}: ${t.message}", t)
-                    throw Exception("native 库加载失败: ${t.javaClass.simpleName} - ${t.message}")
-                }
-                Log.d(TAG, "[DEBUG] 步骤3: 调用 LiveKit.init")
+                Log.d(TAG, "[DEBUG] 步骤3: 调用 LiveKit.init（SDK 内部自动加载 lkjingle_peerconnection_so 原生库）")
                 LiveKit.init(appContext)
                 Log.d(TAG, "[DEBUG] 步骤3完成: LiveKit.init 成功")
 
