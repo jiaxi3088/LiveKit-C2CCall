@@ -94,176 +94,240 @@ jobs:
         working-directory: android
         run: |
           set -e
-          WORK_DIR=fat-aar-work
-          rm -rf $WORK_DIR && mkdir -p $WORK_DIR
 
-          SRC_AAR="$(ls build/outputs/aar/*-release.aar | head -1)"
-          echo "=== Source slim AAR: $(basename $SRC_AAR) ==="
+          # ====== 全部使用绝对路径，避免 cd 导致路径混乱 ======
+          ANDROID_ROOT="$(pwd)"
+          WORK="$ANDROID_ROOT/fat-aar-work"
+          SRC_AAR="$(ls $ANDROID_ROOT/build/outputs/aar/*-release.aar | head -1)"
+          
+          echo "=== Android Root: $ANDROID_ROOT ==="
+          echo "=== Source AAR: $(basename $SRC_AAR) ==="
+          echo "=== Work dir:   $WORK ==="
+          
+          rm -rf "$WORK" && mkdir -p "$WORK"
 
           # ---- Step 1: 解压插件自身 AAR ----
-          cd $WORK_DIR
-          mkdir -p plugin-extract
-          cd plugin-extract
-          unzip -qo "../../$SRC_AAR"
-          cd ..
+          PLUGIN_EXTRACT="$WORK/plugin-extract"
+          mkdir -p "$PLUGIN_EXTRACT"
+          unzip -qo "$SRC_AAR" -d "$PLUGIN_EXTRACT"
+          echo "[Step 1] ✓ Plugin AAR extracted"
+          ls -la "$PLUGIN_EXTRACT/"
 
-          # ---- Step 2: 收集所有传递依赖 ----
-          # 使用 Gradle 获取运行时 classpath（含传递依赖）
-          cd ../..
-          DEPS_FILE="$WORK_DIR/deps-runtime.txt"
-          ./gradlew :dependencies --configuration releaseRuntimeClasspath -q 2>/dev/null \
-            | grep -E '^\+?--- ' \
-            | grep -v 'project :' \
-            | grep -v 'unspecified' \
-            | awk '{print $NF}' \
-            | grep -E ':' \
-            > "$DEPS_FILE" || true
+          # ---- Step 2: 用 Gradle 导出运行时依赖文件路径 ----
+          DEPS_FILE="$WORK/deps-runtime.txt"
+          DEPS_JARS="$WORK/deps-jars"
+          DEPS_AARS="$WORK/deps-aars"
+          mkdir -p "$DEPS_JARS" "$DEPS_AARS"
+          
+          echo ""
+          echo "[Step 2] Running Gradle exportDeps..."
+          ./gradlew :exportDeps --quiet 2>&1 || true
+          
+          # 使用 Gradle 导出的文件路径（每行一个绝对路径）
+          if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ] && [ -s "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
+            cp "$ANDROID_ROOT/build/exports/deps-runtime.txt" "$DEPS_FILE"
+            echo "[Step 2] ✓ Dependencies exported by Gradle task"
+          else
+            echo "[Step 2] ⚠ exportDeps failed or empty, using fallback list from Gradle cache"
+            # Fallback: 用硬编码的 Maven 坐标列表从缓存搜索
+            cat > "$DEPS_FILE" << '__EOF__'
+io.livekit:livekit-android:2.25.1
+androidx.appcompat:appcompat:1.6.1
+androidx.core:core-ktx:1.13.1
+androidx.lifecycle:lifecycle-runtime-ktx:2.8.7
+androidx.lifecycle:lifecycle-common:2.8.7
+org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1
+org.jetbrains.kotlin:kotlin-stdlib:2.0.21
+org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.1
+com.google.code.gson:gson:2.11.0
+com.squareup.okhttp3:okhttp:4.12.0
+com.squareup.okio:okhttp-jvm:4.12.0
+com.squareup.okio:okio:3.9.1
+__EOF__
+          fi
 
-          echo "=== Runtime dependencies ==="
-          cat "$DEPS_FILE"
-          echo "(共 $(wc -l < "$DEPS_FILE") 个依赖)"
+          echo "=== Runtime dependencies ($(wc -l < "$DEPS_FILE") lines) ==="
+          cat -n "$DEPS_FILE"
 
-          # 解析每个依赖的本地路径（从 Gradle cache）
-          mkdir -p $WORK_DIR/deps-jars $WORK_DIR/deps-aars $WORK_DIR/deps-so
+          # ---- Step 2b: 收集依赖文件（支持绝对路径 或 Maven坐标） ----
+          echo ""
+          echo "[Step 2b] Collecting dependency artifacts..."
+          GRADLE_CACHE="$HOME/.gradle/caches"
+          TOTAL_FOUND=0
+
           while IFS= read -r dep; do
             [ -z "$dep" ] && continue
-            # 查找 JAR/AAR 文件
-            FOUND=$(find ~/.gradle/caches -path "*${dep//:/*}*" -name "*.jar" -o -path "*${dep//:/*}*" -name "*.aar" 2>/dev/null \
-              | grep -v sources \
-              | grep -v javadoc \
-              | head -1)
-            if [ -n "$FOUND" ]; then
+            # 跳过注释行
+            [[ "$dep" == __* ]] && continue
+
+            # 判断是绝对路径还是 Maven 坐标
+            if [ -f "$dep" ]; then
+              # 直接是文件路径（来自 exportDeps）
+              FOUND="$dep"
+            else
+              # Maven 坐标格式: groupId:artifactId:version
+              GROUP=$(echo "$dep" | cut -d: -f1)
+              ARTIFACT=$(echo "$dep" | cut -d: -f2)
+              VERSION=$(echo "$dep" | cut -d: -f3)
+              CACHE_SEARCH="${GROUP//\.//}/$ARTIFACT/$VERSION"
+
+              # 从 Gradle modules cache 搜索
+              FOUND=""
+              for candidate_dir in \
+                "$GRADLE_CACHE/modules-2/files-2.1/$CACHE_SEARCH" \
+                "$GRADLE_CACHE/modules-2/files-$ARTIFACT/$CACHE_SEARCH"; do
+                [ -d "$candidate_dir" ] || continue
+                FOUND=$(find "$candidate_dir" -maxdepth 2 \( -name "*.jar" -o -name "*.aar" \) \
+                  ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+                [ -n "$FOUND" ] && break
+              done
+              
+              # 兜底：宽泛搜索
+              if [ -z "$FOUND" ]; then
+                FOUND=$(find "$GRADLE_CACHE" -path "*$ARTIFACT/$VERSION*" \
+                  \( -name "${ARTIFACT}-${VERSION}.jar" -o -name "${ARTIFACT}-${VERSION}.aar" \
+                   -o -name "${ARTIFACT}-*.jar" -o -name "${ARTIFACT}-*.aar" \) \
+                  ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+              fi
+            fi
+
+            # 处理找到的文件
+            if [ -n "$FOUND" ] && [ -f "$FOUND" ]; then
               case "$FOUND" in
                 *.jar)
-                  cp "$FOUND" "$WORK_DIR/deps-jars/" 2>/dev/null || true
-                  echo "  [JAR] $dep → $(basename $FOUND)"
+                  cp "$FOUND" "$DEPS_JARS/" 2>/dev/null
+                  echo "  [JAR] $(basename "$FOUND") ($(du -h "$FOUND" | cut -f1))"
                   ;;
                 *.aar)
-                  # 解压 AAR 提取 classes.jar 和 jni
-                  DEP_BASE=$(basename "$FOUND" .aar)
-                  mkdir -p "$WORK_DIR/deps-aars/$DEP_BASE"
-                  cd "$WORK_DIR/deps-aars/$DEP_BASE"
-                  unzip -qo "$FOUND" 2>/dev/null || true
-                  # 提取 classes.jar（如果非空）
-                  if [ -f classes.jar ] && [ -s classes.jar ]; then
-                    :
-                  elif [ -f classes.jar ]; then
-                    rm -f classes.jar  # 空的 classes.jar（如 android-prefixed WebRTC）
+                  DEP_BASE="$(basename "$FOUND" .aar)"
+                  AAR_DIR="$DEPS_AARS/$DEP_BASE"
+                  mkdir -p "$AAR_DIR"
+                  unzip -qo "$FOUND" -d "$AAR_DIR" 2>/dev/null || true
+                  if [ -f "$AAR_DIR/classes.jar" ] && [ ! -s "$AAR_DIR/classes.jar" ]; then
+                    rm -f "$AAR_DIR/classes.jar"
                   fi
-                  cd ../../..
-                  echo "  [AAR] $dep → $DEP_BASE"
+                  echo "  [AAR] $DEP_BASE ($(du -h "$FOUND" | cut -f1))"
                   ;;
               esac
+              TOTAL_FOUND=$((TOTAL_FOUND+1))
             else
-              echo "  [??]  $dep (未找到文件)"
+              echo "  [??]  $dep (未找到)"
             fi
           done < "$DEPS_FILE"
+          
+          echo ""
+          echo "  找到: $TOTAL_FOUND, 未找到: $TOTAL_MISSING"
+          echo "  JARs: $(ls "$DEPS_JARS/"*.jar 2>/dev/null | wc -l)"
+          echo "  AARs: $(ls -d "$DEPS_AARS"/*/ 2>/dev/null | wc -l)"
 
           # ---- Step 3: 合并所有 classes.jar ----
-          cd $WORK_DIR
+          MERGED_CLASSES="$WORK/merged-classes"
+          mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "=== Step 3: Merging all classes.jar ==="
-          mkdir -p merged-classes
+          echo "[Step 3] Merging all classes.jar..."
 
-          # 先合并插件自身
-          if [ -f plugin-extract/classes.jar ]; then
-            cd merged-classes
-            unzip -qo ../plugin-extract/classes.jar 2>/dev/null || true
-            cd ..
-            echo "  ✓ plugin classes.jar ($(du -h plugin-extract/classes.jar | cut -f1))"
+          # 合并插件自身
+          if [ -f "$PLUGIN_EXTRACT/classes.jar" ]; then
+            unzip -qo "$PLUGIN_EXTRACT/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+            echo "  ✓ plugin classes.jar ($(du -h "$PLUGIN_EXTRACT/classes.jar" | cut -f1))"
+          else
+            echo "  ⚠ plugin has no classes.jar (may be empty library)"
           fi
 
           # 合并依赖 JARs
-          COUNT=0
-          for jar in deps-jars/*.jar; do
-            [ -f "$jar" ] || continue
-            [ -s "$jar" ] || continue
-            cd merged-classes
-            unzip -qo "../$jar" 2>/dev/null || true
-            cd ..
-            COUNT=$((COUNT+1))
+          JCOUNT=0
+          for jarfile in "$DEPS_JARS/"*.jar; do
+            [ -f "$jarfile" ] || continue
+            [ -s "$jarfile" ] || continue
+            unzip -qo "$jarfile" -d "$MERGED_CLASSES" 2>/dev/null || true
+            JCOUNT=$((JCOUNT+1))
           done
-          echo "  ✓ $COUNT direct JARs merged"
+          echo "  ✓ $JCOUNT direct JARs merged"
 
-          # 合并依赖 AAR 中提取的 classes.jar
+          # 合并依赖 AAR 的 classes.jar
           ACOUNT=0
-          for aardir in deps-aars/*/; do
+          for aardir in "$DEPS_AARS"/*/; do
             [ -d "$aardir" ] || continue
-            if [ -f "${aardir}classes.jar" ] && [ -s "${aardir}classes.jar" ]; then
-              cd merged-classes
-              unzip -qo "${aardir}classes.jar" 2>/dev/null || true
-              cd ..
+            CJAR="$aardir/classes.jar"
+            if [ -f "$CJAR" ] && [ -s "$CJAR" ]; then
+              unzip -qo "$CJAR" -d "$MERGED_CLASSES" 2>/dev/null || true
               ACOUNT=$((ACOUNT+1))
             fi
           done
           echo "  ✓ $ACOUNT AAR classes.jar merged"
 
-          # 打包为合并后的 classes.jar（排除 META-INF 签名和冲突文件）
-          echo ""
-          echo "  Repacking merged classes.jar..."
-          cd merged-classes
-          # 删除签名文件避免冲突
-          rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF 2>/dev/null || true
-          jar cf ../classes-merged.jar .
-          cd ..
-          echo "  ✓ classes-merged.jar: $(du -h classes-merged.jar | cut -f1)"
+          # 打包为合并后的 classes.jar（排除签名冲突）
+          CLASSES_MERGED="$WORK/classes-merged.jar"
+          echo "  Repacking → classes-merged.jar ..."
+          (cd "$MERGED_CLASSES" && \
+            rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF 2>/dev/null; \
+            jar cf "$CLASSES_MERGED" . )
+          echo "  ✓ classes-merged.jar: $(du -h "$CLASSES_MERGED" | cut -f1)"
 
           # ---- Step 4: 收集所有 .so 原生库 ----
+          JNI_OUT="$WORK/jni"
+          mkdir -p "$JNI_OUT"
           echo ""
-          echo "=== Step 4: Collecting .so native libraries ==="
-          SO_COUNT=0
+          echo "[Step 4] Collecting .so native libraries..."
+
+          SO_TOTAL=0
           # 从依赖 AAR 中提取 .so
-          for aardir in deps-aars/*/; do
+          for aardir in "$DEPS_AARS"/*/; do
             [ -d "$aardir" ] || continue
-            if [ -d "${aardir}jni" ]; then
-              find "${aardir}jni" -name "*.so" 2>/dev/null | while read so; do
-                REL_PATH="${so#${aardir}jni/}"
-                mkdir -p "jni/$(dirname "$REL_PATH")"
-                cp "$so" "jni/$REL_PATH" 2>/dev/null || true
-                SO_COUNT=$((SO_COUNT+1))
-              done
+            if [ -d "$aardir/jni" ]; then
+              (cd "$aardir/jni" && find . -name "*.so" 2>/dev/null | while read so_rel; do
+                SO_SRC="$aardir/jni/$so_rel"
+                SO_DST="$JNI_OUT/$so_rel"
+                mkdir -p "$(dirname "$SO_DST")"
+                cp "$SO_SRC" "$SO_DST" 2>/dev/null
+              done) || true
             fi
           done
           # 从插件自身提取 .so（如果有）
-          if [ -d plugin-extract/jni ]; then
-            find plugin-extract/jni -name "*.so" 2>/dev/null | while read so; do
-              REL_PATH="${so#plugin-extract/jni/}"
-              mkdir -p "jni/$(dirname "$REL_PATH")"
-              cp "$so" "jni/$REL_PATH" 2>/dev/null || true
-              done
+          if [ -d "$PLUGIN_EXTRACT/jni" ]; then
+            (cd "$PLUGIN_EXTRACT/jni" && find . -name "*.so" 2>/dev/null | while read so_rel; do
+              SO_SRC="$PLUGIN_EXTRACT/jni/$so_rel"
+              SO_DST="$JNI_OUT/$so_rel"
+              mkdir -p "$(dirname "$SO_DST")"
+              cp "$SO_SRC" "$SO_DST" 2>/dev/null
+            done) || true
           fi
-          echo "  Collected .so files:"
-          find jni -name "*.so" 2>/dev/null -exec ls -lh {} \; || echo "  (无 .so)"
+
+          SO_TOTAL=$(find "$JNI_OUT" -name "*.so" 2>/dev/null | wc -l)
+          echo "  Total .so files: $SO_TOTAL"
+          if [ "$SO_TOTAL" -gt 0 ]; then
+            find "$JNI_OUT" -name "*.so" -exec ls -lh {} \;
+          else
+            echo "  (无 .so — WebRTC native libraries 可能缺失!)"
+          fi
 
           # ---- Step 5: 组装最终 Fat AAR ----
+          FAT_FINAL="$WORK/fat-aar-final"
+          mkdir -p "$FAT_FINAL"
           echo ""
-          echo "=== Step 5: Assembling final Fat AAR ==="
-          FAT_DIR=fat-aar-final
-          mkdir -p $FAT_DIR
+          echo "[Step 5] Assembling final Fat AAR..."
 
-          # AndroidManifest.xml（使用插件自身的）
-          cp plugin-extract/AndroidManifest.xml $FAT_DIR/ 2>/dev/null || true
+          # AndroidManifest.xml
+          [ -f "$PLUGIN_EXTRACT/AndroidManifest.xml" ] && cp "$PLUGIN_EXTRACT/AndroidManifest.xml" "$FAT_FINAL/"
 
           # 合并后的 classes.jar
-          cp classes-merged.jar $FAT_DIR/classes.jar
+          cp "$CLASSES_MERGED" "$FAT_FINAL/classes.jar"
 
           # 所有 .so
-          if [ -d jni ]; then
-            cp -r jni $FAT_DIR/
+          if [ -d "$JNI_OUT" ] && [ "$(ls -A "$JNI_OUT" 2>/dev/null)" ]; then
+            cp -r "$JNI_OUT" "$FAT_FINAL/jni"
           fi
 
-          # R.txt（使用插件自身的）
-          cp plugin-extract/R.txt $FAT_DIR/ 2>/dev/null || true
+          # R.txt
+          [ -f "$PLUGIN_EXTRACT/R.txt" ] && cp "$PLUGIN_EXTRACT/R.txt" "$FAT_FINAL/"
 
-          # proguard.txt（如果有）
-          cp plugin-extract/proguard.txt $FAT_DIR/proguard.txt 2>/dev/null || true
+          # proguard.txt
+          [ -f "$PLUGIN_EXTRACT/proguard.txt" ] && cp "$PLUGIN_EXTRACT/proguard.txt" "$FAT_FINAL/"
 
           # 打包成最终 AAR
-          cd $FAT_DIR
-          jar cf ../../build/outputs/aar/livekit-c2c-fat.aar .
-          cd ../..
+          (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
 
-          FAT_SIZE=$(du -h build/outputs/aar/livekit-c2c-fat.aar | cut -f1)
+          FAT_SIZE=$(du -h "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | cut -f1)
           echo ""
           echo "========================================="
           echo "  Fat AAR 构建完成!"
@@ -271,8 +335,8 @@ jobs:
           echo "  大小: $FAT_SIZE"
           echo "========================================="
           echo ""
-          echo "AAR 内容列表:"
-          unzip -l build/outputs/aar/livekit-c2c-fat.aar | tail -30
+          echo "AAR 内容:"
+          unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | tail -40
 
       - name: Upload Android AAR (Fat)
         uses: actions/upload-artifact@v4
