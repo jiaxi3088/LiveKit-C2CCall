@@ -6,17 +6,18 @@ import android.util.Log
 import android.view.View
 import android.widget.FrameLayout
 import io.dcloud.feature.uniapp.annotation.UniComponent
-import io.dcloud.feature.uniapp.common.UniComponent
-import org.webrtc.RendererCommon.ScalingType
+import io.dcloud.feature.uniapp.common.UniComponent as UniComponentBase
+import org.webrtc.EglBase
+import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 
 /**
- * LiveKit 视频渲染原生组件
- * 
- * 在 nvue 中使用：
- *   <livekit-video-view type="remote"></livekit-video-view>
- *   <livekit-video-view type="local"></livekit-video-view>
- * 
+ * LiveKit 视频渲染原生 nvue 组件
+ *
+ * 使用方式（nvue 页面）：
+ *   <livekit-video-view type="remote" style="flex:1"></livekit-video-view>
+ *   <livekit-video-view type="local" style="width:120;height:160"></livekit-video-view>
+ *
  * 属性：
  *   - type: "local" | "remote"（默认 "remote"）
  */
@@ -25,46 +26,48 @@ class LiveKitVideoView @JvmOverloads constructor(
     context: Context,
     attributeSet: AttributeSet? = null,
     defStyleAttr: Int = 0
-) : UniComponent(context, attributeSet, defStyleAttr) {
+) : UniComponentBase(context, attributeSet, defStyleAttr) {
 
     companion object {
-        private const val TAG = "LiveKitVideoView"
-        private var sharedEglBase: org.webrtc.EglBase? = null
-        
-        /**
-         * 获取共享的 EglBase（所有渲染器共用同一个 EglContext）
-         */
-        fun getSharedEglBase(): org.webrtc.EglBase? {
+        private const val TAG = "LKVideoView"
+
+        /** 共享 EglBase：所有 SurfaceViewRenderer 共享同一个 EGL 上下文 */
+        private var sharedEglBase: EglBase? = null
+
+        @Synchronized
+        fun getSharedEglBase(): EglBase {
             if (sharedEglBase == null) {
-                sharedEglBase = org.webrtc.EglBase.create()
-                Log.d(TAG, "[VIEW] 共享 EglBase 创建成功")
+                sharedEglBase = EglBase.create()
+                Log.i(TAG, "Shared EglBase created")
             }
-            return sharedEglBase
+            return sharedEglBase!!
         }
-        
-        /**
-         * 释放共享 EglBase（在 Activity 销毁时调用）
-         */
+
+        @Synchronized
         fun releaseSharedEglBase() {
             try {
                 sharedEglBase?.release()
-                sharedEglBase = null
-                Log.d(TAG, "[VIEW] 共享 EglBase 已释放")
-            } catch (e: Exception) {
-                // ignore
+                Log.i(TAG, "Shared EglBase released")
+            } catch (_: Exception) {
             }
+            sharedEglBase = null
         }
-        
-        // 持有当前活跃的视图引用，供 Module 绑定轨道
-        var localViewInstance: LiveKitVideoView? = null
-        var remoteViewInstance: LiveKitVideoView? = null
+
+        /** 全局引用：供 Module 查找并绑定视频流 */
+        @JvmStatic var localViewInstance: LiveKitVideoView? = null
+            private set
+
+        @JvmStatic var remoteViewInstance: LiveKitVideoView? = null
+            private set
     }
 
     private var renderer: SurfaceViewRenderer? = null
-    private var viewType: String = "remote"
+    internal var viewType: String = "remote"
+        private set
+
+    // ==================== 初始化 ====================
 
     init {
-        // 创建 FrameLayout 容器
         val container = FrameLayout(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -72,12 +75,10 @@ class LiveKitVideoView @JvmOverloads constructor(
             )
         }
 
-        // 创建 SurfaceViewRenderer
-        val eglBase = getSharedEglBase()
         renderer = SurfaceViewRenderer(context).apply {
-            init(eglBase?.eglBaseContext, null)
-            setScalingType(ScalingType.SCALE_ASPECT_FIT)
-            setEnableHardwareScaler(true)
+            init(getSharedEglBase().eglBaseContext, null)
+            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+            isEnableHardwareScaler = true
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -86,47 +87,42 @@ class LiveKitVideoView @JvmOverloads constructor(
         container.addView(renderer!!)
         setContainerView(container)
 
-        Log.d(TAG, "[VIEW] LiveKitVideoView 初始化完成")
+        Log.d(TAG, "LiveKitVideoView init OK")
     }
+
+    // ==================== 生命周期回调 ====================
 
     override fun onCreated() {
         super.onCreated()
-        // 读取 type 属性，注册到全局引用
-        viewType = getAttr("type") ?: "remote"
-        
+        viewType = getAttr("type")?.toString() ?: "remote"
+
         when (viewType) {
             "local" -> localViewInstance = this
             "remote" -> remoteViewInstance = this
         }
-        Log.d(TAG,("[VIEW] onCreated: type=$viewType"))
+        Log.d(TAG, "onCreated: type=$viewType")
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        
-        // 从全局引用移除
+
         when (viewType) {
             "local" -> if (localViewInstance === this) localViewInstance = null
             "remote" -> if (remoteViewInstance === this) remoteViewInstance = null
         }
 
-        // 释放渲染器
         try {
             renderer?.release()
-            renderer = null
-        } catch (e: Exception) {
-            // ignore
+        } catch (_: Exception) {
         }
-        Log.d(TAG, "[VIEW] onDestroy: type=$viewType")
+        renderer = null
+        Log.d(TAG, "onDestroy: type=$viewType")
     }
 
+    // ==================== 公共 API ====================
+
     /**
-     * 获取内部的 SurfaceViewRenderer（供 Module 绑定视频流）
+     * 获取内部 SurfaceViewRenderer，用于 Module 绑定 VideoTrack
      */
     fun getRenderer(): SurfaceViewRenderer? = renderer
-    
-    /**
-     * 获取视图类型
-     */
-    fun getViewType(): String = viewType
 }

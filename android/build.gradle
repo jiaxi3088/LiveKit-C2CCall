@@ -43,6 +43,10 @@ android {
 dependencies {
     // LiveKit Android SDK + 所有依赖 — CI 中用 Shell 脚本打入 AAR（Fat AAR）
     implementation 'io.livekit:livekit-android:2.25.1'
+    
+    // WebRTC (由 livekit-android 传递引入，此处显式声明确保 CI 编译可解析 org.webrtc.*)
+    implementation 'org.webrtc:google-webrtc:1.0.+'
+    
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'

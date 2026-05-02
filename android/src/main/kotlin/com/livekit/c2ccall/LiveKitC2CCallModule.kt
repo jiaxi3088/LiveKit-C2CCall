@@ -14,7 +14,10 @@ import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
-import io.livekit.android.room.track.Track.Kind as TrackKind
+import io.livekit.android.room.participant.Participant
+import io.livekit.android.room.track.Track
+import io.livekit.android.room.track.VideoTrack
+import org.webrtc.VideoTrack as WebrtcVideoTrack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -306,31 +309,19 @@ class LiveKitC2CCallModule : UniModule() {
                 try {
                     val r = room ?: return@launch
                     
-                    // 绑定本地视频
-                    val localTrack = r.localParticipant.videoTrackPublications.values.firstOrNull()?.track
-                    if (localTrack != null && localRenderer != null) {
-                        localTrack.addSink(localRenderer)
-                        Log.d(TAG, "[RENDER] ✅ 本地视频已绑定到渲染组件")
-                    }
+                    // === 绑定本地视频轨道到 local renderer ===
+                    bindVideoTrackToLocalRenderer(r, localRenderer)
                     
-                    // 绑定远端视频
+                    // === 绑定远端视频轨道到 remote renderer ===
                     r.remoteParticipants.values.forEach { remote ->
-                        val videoTrack = remote.videoTrackPublications.values.firstOrNull()?.track
-                        if (videoTrack != null && remoteRenderer != null) {
-                            videoTrack.addSink(remoteRenderer)
-                            Log.d(TAG, "[RENDER] ✅ 远端视频已绑定到渲染组件")
-                        }
+                        bindParticipantVideoToRenderer(remote, remoteRenderer)
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "[RENDER] 绑定轨道失败: ${e.message}")
+                    Log.w(TAG, "[RENDER] bind tracks failed: ${e.message}")
                 }
             }
 
-            invokeSuccess(callback, mapOf(
-                "msg" to "ok",
-                "localReady" to (localRenderer != null),
-                "remoteReady" to (remoteRenderer != null)
-            ))
+            invokeSuccess(callback, "ok")
         } catch (e: Exception) {
             Log.e(TAG, "[RENDER] ❌ initRenderers 失败: ${e.message}", e)
             invokeError(callback, "initRenderers 失败: ${e.message}")
@@ -593,29 +584,151 @@ class LiveKitC2CCallModule : UniModule() {
         scope.launch {
             try {
                 val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
-                Log.d(TAG, "[MEDIA] 开始订阅远端参与者: ${remote.identity}, 渲染器=${if (remoteRenderer != null) "已就绪" else "⚠️ 未初始化（请在 nvue 中添加 <livekit-video-view type='remote'>）"}")
+                Log.d(TAG, "[MEDIA] Subscribing remote: ${remote.identity}, renderer=${if (remoteRenderer != null) "ready" else "NOT ready (add <livekit-video-view type='remote'> in nvue)"}")
                 
-                // 订阅视频轨道
-                val videoTrack = remote.videoTrackPublications.values.firstOrNull()?.track
-                if (videoTrack != null && remoteRenderer != null) {
-                    videoTrack.addSink(remoteRenderer)
-                    Log.d(TAG, "[MEDIA] ✅ 远端视频轨道已绑定到渲染组件")
-                    sendEvent("onRemoteVideoReady", "对方视频画面就绪")
-                } else if (videoTrack == null) {
-                    Log.d(TAG, "[MEDIA] ⚠️ 远端暂无视频轨道，等待...")
+                // 订阅视频轨道 — 从 trackPublications 中筛选 VIDEO kind
+                val videoPub = findTrackPublication(remote, Track.Kind.VIDEO)
+                if (videoPub != null && remoteRenderer != null) {
+                    bindTrackToRenderer(videoPub, remoteRenderer)
+                    Log.d(TAG, "[MEDIA] OK remote video bound to renderer")
+                    sendEvent("onRemoteVideoReady", "Remote video ready")
+                } else if (videoPub == null) {
+                    Log.d(TAG, "[MEDIA] No video track yet, waiting...")
                 } else if (remoteRenderer == null) {
-                    Log.w(TAG, "[MEDIA] ⚠️ 远端有视频但渲染组件未初始化，请确保 nvue 中有 <livekit-video-view type='remote'>")
+                    Log.w(TAG, "[MEDIA] Has video but renderer not initialized")
                 }
                 
-                // 订阅音频轨道
-                val audioTrack = remote.audioTrackPublications.values.firstOrNull()?.track
-                if (audioTrack != null) {
-                    Log.d(TAG, "[MEDIA] ✅ 远端音频轨道就绪")
-                    sendEvent("onRemoteAudioReady", "对方声音就绪")
+                // 检查音频轨道
+                val audioPub = findTrackPublication(remote, Track.Kind.AUDIO)
+                if (audioPub != null) {
+                    Log.d(TAG, "[MEDIA] OK remote audio track ready")
+                    sendEvent("onRemoteAudioReady", "Remote audio ready")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "[MEDIA] ❌ 订阅远端轨道失败: ${e.message}", e)
+                Log.e(TAG, "[MEDIA] Failed subscribe remote: ${e.message}", e)
             }
+        }
+    }
+
+    // ==================== Track 辅助方法 ====================
+
+    /**
+     * 从 Participant 的 trackPublications 中按 kind 查找第一个 TrackPublication
+     * 
+     * 兼容 LiveKit Android SDK 2.x:
+     * - Participant.trackPublications 是 Map<String, TrackPublication>
+     * - 通过 .values 遍历并按 kind 过滤
+     */
+    private fun findTrackPublication(participant: Participant, kind: Track.Kind): io.livekit.android.room.track.TrackPublication? {
+        return try {
+            participant.trackPublications.values.find { it.kind == kind }
+        } catch (e: Exception) {
+            Log.w(TAG, "[TRACK] findTrackPublication failed for $kind: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 将 TrackPublication 的 videoTrack 绑定到 SurfaceViewRenderer
+     * 
+     * 核心逻辑：
+     * 1. 从 publication 获取 LiveKit VideoTrack
+     * 2. 尝试转为 WebRTC org.webrtc.VideoTrack (它有 addSink/removeSink 方法)
+     * 3. 调用 addSink(renderer) 完成绑定
+     */
+    private fun bindTrackToRenderer(
+        publication: io.livekit.android.room.track.TrackPublication,
+        renderer: org.webrtc.SurfaceViewRenderer
+    ) {
+        try {
+            val track = publication.track ?: run {
+                Log.w(TAG, "[TRACK] publication.track is null (not subscribed?)")
+                return
+            }
+            
+            when (track) {
+                is WebrtcVideoTrack -> {
+                    track.addSink(renderer)
+                    Log.d(TAG, "[TRACK] OK bound via WebRTC VideoTrack.addSink")
+                }
+                is VideoTrack -> {
+                    // LiveKit VideoTrack — 尝试获取底层 WebRTC track
+                    val webrtcTrack = try {
+                        (track as? WebrtcVideoTrack)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (webrtcTrack != null) {
+                        webrtcTrack.addSink(renderer)
+                        Log.d(TAG, "[TRACK] OK bound via cast to WebRTC VideoTrack")
+                    } else {
+                        // 最后尝试：反射调用 addSink
+                        try {
+                            val method = track.javaClass.methods.find { it.name == "addSink" }
+                            if (method != null) {
+                                method.invoke(track, renderer)
+                                Log.d(TAG, "[TRACK] OK bound via reflection addSink")
+                            } else {
+                                Log.w(TAG, "[TRACK] Cannot bind: no addSink found on ${track.javaClass.name}")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[TRACK] Reflection bind failed: ${e.message}")
+                        }
+                    }
+                }
+                else -> {
+                    Log.w(TAG, "[TRACK] Unexpected track type: ${track.javaClass.name}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[TRACK] bindTrackToRenderer error: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 解绑 TrackPublication 的 videoTrack 与 SurfaceViewRenderer
+     */
+    private fun unbindTrackFromRenderer(
+        publication: io.livekit.android.room.track.TrackPublication,
+        renderer: org.webrtc.SurfaceViewRenderer?
+    ) {
+        if (renderer == null) return
+        try {
+            val track = publication.track ?: return
+            
+            if (track is WebrtcVideoTrack) {
+                track.removeSink(renderer)
+            } else {
+                try {
+                    val method = track.javaClass.methods.find { it.name == "removeSink" }
+                    method?.invoke(track, renderer)
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+    }
+
+    /** 绑定本地参与者的视频轨到 local renderer */
+    private fun bindVideoTrackToLocalRenderer(r: Room, localRenderer: org.webrtc.SurfaceViewRenderer?) {
+        val pub = findTrackPublication(r.localParticipant, Track.Kind.VIDEO)
+        if (pub != null && localRenderer != null) {
+            bindTrackToRenderer(pub, localRenderer)
+            Log.d(TAG, "[RENDER] OK local video bound to renderer")
+        }
+    }
+
+    /** 绑定参与者的视频轨到指定 renderer */
+    private fun bindParticipantVideoToRenderer(participant: Participant, renderer: org.webrtc.SurfaceViewRenderer?) {
+        val pub = findTrackPublication(participant, Track.Kind.VIDEO)
+        if (pub != null && renderer != null) {
+            bindTrackToRenderer(pub, renderer)
+        }
+    }
+
+    /** 解绑参与者的视频轨与指定 renderer */
+    private fun unbindParticipantVideo(participant: Participant, renderer: org.webrtc.SurfaceViewRenderer?) {
+        val pub = findTrackPublication(participant, Track.Kind.VIDEO)
+        if (pub != null) {
+            unbindTrackFromRenderer(pub, renderer)
         }
     }
 
@@ -628,62 +741,60 @@ class LiveKitC2CCallModule : UniModule() {
                 when (event) {
                     is ParticipantEvent.TrackPublished -> {
                         when (event.publication.kind) {
-                            TrackKind.VIDEO -> {
-                                sendEvent("onRemoteCameraOn", "对方已开启摄像头")
-                                announceForAccessibility("对方已开启摄像头")
-                                // 尝试立即订阅新发布的视频轨道
+                            Track.Kind.VIDEO -> {
+                                sendEvent("onRemoteCameraOn", "Remote camera on")
+                                announceForAccessibility("Remote camera on")
                                 scope.launch {
                                     try {
-                                        val videoTrack = event.publication.track
                                         val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
-                                        if (videoTrack != null && remoteRenderer != null) {
-                                            videoTrack.addSink(remoteRenderer)
-                                            Log.d(TAG, "[MEDIA] 新发布视频轨道已绑定到渲染组件")
-                                            sendEvent("onRemoteVideoReady", "对方视频画面就绪")
+                                        if (remoteRenderer != null) {
+                                            bindTrackToRenderer(event.publication, remoteRenderer)
+                                            Log.d(TAG, "[MEDIA] New video track bound")
+                                            sendEvent("onRemoteVideoReady", "Remote video ready")
                                         }
                                     } catch (e: Exception) {
-                                        Log.e(TAG, "[MEDIA] 订阅新视频轨道失败: ${e.message}")
+                                        Log.e(TAG, "[MEDIA] Bind new video track failed: ${e.message}")
                                     }
                                 }
                             }
-                            TrackKind.AUDIO -> {
-                                sendEvent("onRemoteAudioOn", "对方已开启麦克风")
-                                announceForAccessibility("对方已开启麦克风")
+                            Track.Kind.AUDIO -> {
+                                sendEvent("onRemoteAudioOn", "Remote mic on")
+                                announceForAccessibility("Remote mic on")
                             }
                             else -> {}
                         }
                     }
                     is ParticipantEvent.TrackUnpublished -> {
                         when (event.publication.kind) {
-                            TrackKind.VIDEO -> {
-                                sendEvent("onRemoteCameraOff", "对方已关闭摄像头")
-                                announceForAccessibility("对方已关闭摄像头")
+                            Track.Kind.VIDEO -> {
+                                sendEvent("onRemoteCameraOff", "Remote camera off")
+                                announceForAccessibility("Remote camera off")
                             }
-                            TrackKind.AUDIO -> {
-                                sendEvent("onRemoteAudioOff", "对方已关闭麦克风")
-                                announceForAccessibility("对方已关闭麦克风")
+                            Track.Kind.AUDIO -> {
+                                sendEvent("onRemoteAudioOff", "Remote mic off")
+                                announceForAccessibility("Remote mic off")
                             }
                             else -> {}
                         }
                     }
                     is ParticipantEvent.TrackMuted -> {
                         when (event.publication.kind) {
-                            TrackKind.VIDEO -> {
-                                sendEvent("onRemoteCameraOff", "对方已关闭摄像头")
+                            Track.Kind.VIDEO -> {
+                                sendEvent("onRemoteCameraOff", "Remote camera off")
                             }
-                            TrackKind.AUDIO -> {
-                                sendEvent("onRemoteAudioOff", "对方已关闭麦克风")
+                            Track.Kind.AUDIO -> {
+                                sendEvent("onRemoteAudioOff", "Remote mic off")
                             }
                             else -> {}
                         }
                     }
                     is ParticipantEvent.TrackUnmuted -> {
                         when (event.publication.kind) {
-                            TrackKind.VIDEO -> {
-                                sendEvent("onRemoteCameraOn", "对方已开启摄像头")
+                            Track.Kind.VIDEO -> {
+                                sendEvent("onRemoteCameraOn", "Remote camera on")
                             }
-                            TrackKind.AUDIO -> {
-                                sendEvent("onRemoteAudioOn", "对方已开启麦克风")
+                            Track.Kind.AUDIO -> {
+                                sendEvent("onRemoteAudioOn", "Remote mic on")
                             }
                             else -> {}
                         }
@@ -707,18 +818,17 @@ class LiveKitC2CCallModule : UniModule() {
         scope.launch {
             try {
                 val r = room ?: return@launch
-                // 解绑本地视频
-                r.localParticipant.videoTrackPublications.values.forEach { pub ->
-                    pub.track?.removeSink(localRenderer)
-                }
-                // 解绑远端视频
+                val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
+                val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
+                
+                // Unbind local video track
+                unbindParticipantVideo(r.localParticipant, localRenderer)
+                // Unbind remote video tracks
                 r.remoteParticipants.values.forEach { remote ->
-                    remote.videoTrackPublications.values.forEach { pub ->
-                        pub.track?.removeSink(remoteRenderer)
-                    }
+                    unbindParticipantVideo(remote, remoteRenderer)
                 }
             } catch (e: Exception) {
-                // ignore
+                // ignore cleanup errors
             }
         }
 
