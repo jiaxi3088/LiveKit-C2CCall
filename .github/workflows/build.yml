@@ -95,10 +95,11 @@ jobs:
         run: |
           set -e
 
-          # ====== Full Fat AAR: 全部依赖自包含 ======
+          # ====== Full Fat AAR: 全部依赖自包含 v2 ======
           # 不再依赖 HBuilderX 解析 Maven 依赖
-          # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC + 所有 .so
+          # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + 所有 .so
           # 预期大小: ~30-40MB
+          # 修复: 解决 livekit.org.webrtc.PeerConnectionFactory$InitializationOptions ClassNotFoundException
 
           ANDROID_ROOT="$(pwd)"
           WORK="$ANDROID_ROOT/fat-aar-work"
