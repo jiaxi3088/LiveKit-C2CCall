@@ -55,7 +55,7 @@ dependencies {
 // Fat AAR 方案: CI 中将所有依赖打入最终 AAR（含 LiveKit SDK + WebRTC .so）
 // 产物为 Fat AAR (~30-40MB)，HBuilderX 云打包时无需额外解析 Maven 依赖
 
-// 导出运行时依赖（含传递依赖）供 Fat AAR 脚本使用
+// 导出运行时依赖（含传递依赖）供 Semi-Fat AAR 脚本使用
 task exportDeps {
     doLast {
         def exportsDir = file("${project.buildDir}/exports")
@@ -63,16 +63,22 @@ task exportDeps {
         def outFile = new File(exportsDir, "deps-runtime.txt")
         outFile.text = ""
 
-        // 获取 releaseRuntimeClasspath 的所有文件
         def runtimeFiles = configurations.releaseRuntimeClasspath.files
         runtimeFiles.each { f ->
-            // 排除 uni-app stub 和项目自身
             if (f.name.contains("uniapp") || f.name == project.name + "-release.aar") return
-            
-            // 尝试从文件路径反推 Maven 坐标（简化处理：直接输出路径）
             outFile.append(f.absolutePath + "\n")
         }
+        println "=== Exported ${runtimeFiles.size()} runtime deps to ${outFile} ==="
+    }
+}
 
-        println "=== Exported ${runtimeFiles.size()} runtime dependencies to ${outFile} ==="
+// 打印 LiveKit SDK 的实际文件路径（用于 CI 定位）
+task printLiveKitPath {
+    doLast {
+        configurations.releaseRuntimeClasspath.files.each { f ->
+            if (f.name.contains("livekit")) {
+                println "LIVEKIT_AAR_PATH=${f.absolutePath}"
+            }
+        }
     }
 }

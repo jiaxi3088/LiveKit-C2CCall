@@ -90,19 +90,22 @@ jobs:
           echo "AAR file(s):"
           ls -la build/outputs/aar/*-release.aar
 
-      - name: Create Fat AAR (merge all dependencies)
+      - name: Create Semi-Fat AAR (LiveKit core + .so only)
         working-directory: android
         run: |
           set -e
 
-          # ====== 全部使用绝对路径，避免 cd 导致路径混乱 ======
+          # ====== Semi-Fat AAR: 只打包 LiveKit SDK 核心 + WebRTC .so ======
+          # 不包含: androidx / kotlin-stdlib / gson / okHttp (HBuilderX基座已自带)
+          # 预期大小: ~5-8MB (vs 全量Fat ~34MB)
+
           ANDROID_ROOT="$(pwd)"
-          WORK="$ANDROID_ROOT/fat-aar-work"
+          WORK="$ANDROID_ROOT/semi-fat-work"
           SRC_AAR="$(ls $ANDROID_ROOT/build/outputs/aar/*-release.aar | head -1)"
           
-          echo "=== Android Root: $ANDROID_ROOT ==="
-          echo "=== Source AAR: $(basename $SRC_AAR) ==="
-          echo "=== Work dir:   $WORK ==="
+          echo "=== Semi-Fat AAR Build ==="
+          echo "  Source: $(basename $SRC_AAR)"
+          echo "  Work:   $WORK"
           
           rm -rf "$WORK" && mkdir -p "$WORK"
 
@@ -110,210 +113,152 @@ jobs:
           PLUGIN_EXTRACT="$WORK/plugin-extract"
           mkdir -p "$PLUGIN_EXTRACT"
           unzip -qo "$SRC_AAR" -d "$PLUGIN_EXTRACT"
-          echo "[Step 1] ✓ Plugin AAR extracted"
-          ls -la "$PLUGIN_EXTRACT/"
+          echo "[Step 1] ✓ Plugin extracted"
 
-          # ---- Step 2: 用 Gradle 导出运行时依赖文件路径 ----
-          DEPS_FILE="$WORK/deps-runtime.txt"
-          DEPS_JARS="$WORK/deps-jars"
-          DEPS_AARS="$WORK/deps-aars"
-          mkdir -p "$DEPS_JARS" "$DEPS_AARS"
+          # ---- Step 2: 定位并提取 LiveKit SDK (唯一必需的外部依赖) ----
+          LIVEKIT_DIR="$WORK/livekit-sdk"
+          mkdir -p "$LIVEKIT_DIR"
+          GRADLE_CACHE="$HOME/.gradle/caches"
           
-          echo ""
-          echo "[Step 2] Running Gradle exportDeps..."
-          ./gradlew :exportDeps --quiet 2>&1 || true
+          echo "[Step 2] Locating LiveKit SDK in Gradle cache..."
           
-          # 使用 Gradle 导出的文件路径（每行一个绝对路径）
-          if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ] && [ -s "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
-            cp "$ANDROID_ROOT/build/exports/deps-runtime.txt" "$DEPS_FILE"
-            echo "[Step 2] ✓ Dependencies exported by Gradle task"
-          else
-            echo "[Step 2] ⚠ exportDeps failed or empty, using fallback list from Gradle cache"
-            # Fallback: 用硬编码的 Maven 坐标列表从缓存搜索
-            printf '%s\n' \
-              "io.livekit:livekit-android:2.25.1" \
-              "androidx.appcompat:appcompat:1.6.1" \
-              "androidx.core:core-ktx:1.13.1" \
-              "androidx.lifecycle:lifecycle-runtime-ktx:2.8.7" \
-              "androidx.lifecycle:lifecycle-common:2.8.7" \
-              "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1" \
-              "org.jetbrains.kotlin:kotlin-stdlib:2.0.21" \
-              "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.1" \
-              "com.google.code.gson:gson:2.11.0" \
-              "com.squareup.okhttp3:okhttp:4.12.0" \
-              "com.squareup.okio:okhttp-jvm:4.12.0" \
-              "com.squareup.okio:okio:3.9.1" \
-              > "$DEPS_FILE"
+          # 在 Gradle cache 中搜索 livekit-android AAR
+          LIVEKIT_AAR=""
+          for search_path in \
+            "$GRADLE_CACHE/modules-2/files-2.1/io.livekit/livekit-android/2.25.1" \
+            "$GRADLE_CACHE/modules-2/files-livekit-android/io.livekit/livekit-android/2.25.1"; do
+            [ -d "$search_path" ] || continue
+            CANDIDATE=$(find "$search_path" -maxdepth 3 -name "livekit-android-*.aar" \
+              ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+            [ -n "$CANDIDATE" ] && { LIVEKIT_AAR="$CANDIDATE"; break; }
+          done
+
+          # 兜底宽泛搜索
+          if [ -z "$LIVEKIT_AAR" ]; then
+            LIVEKIT_AAR=$(find "$GRADLE_CACHE" -path "*livekit-android*2.25.1*" \
+              -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
           fi
 
-          echo "=== Runtime dependencies ($(wc -l < "$DEPS_FILE") lines) ==="
-          cat -n "$DEPS_FILE"
-
-          # ---- Step 2b: 收集依赖文件（支持绝对路径 或 Maven坐标） ----
-          echo ""
-          echo "[Step 2b] Collecting dependency artifacts..."
-          GRADLE_CACHE="$HOME/.gradle/caches"
-          TOTAL_FOUND=0
-
-          while IFS= read -r dep; do
-            [ -z "$dep" ] && continue
-            # 跳过注释行
-            [[ "$dep" == __* ]] && continue
-
-            # 判断是绝对路径还是 Maven 坐标
-            if [ -f "$dep" ]; then
-              # 直接是文件路径（来自 exportDeps）
-              FOUND="$dep"
-            else
-              # Maven 坐标格式: groupId:artifactId:version
-              GROUP=$(echo "$dep" | cut -d: -f1)
-              ARTIFACT=$(echo "$dep" | cut -d: -f2)
-              VERSION=$(echo "$dep" | cut -d: -f3)
-              CACHE_SEARCH="${GROUP//\.//}/$ARTIFACT/$VERSION"
-
-              # 从 Gradle modules cache 搜索
-              FOUND=""
-              for candidate_dir in \
-                "$GRADLE_CACHE/modules-2/files-2.1/$CACHE_SEARCH" \
-                "$GRADLE_CACHE/modules-2/files-$ARTIFACT/$CACHE_SEARCH"; do
-                [ -d "$candidate_dir" ] || continue
-                FOUND=$(find "$candidate_dir" -maxdepth 2 \( -name "*.jar" -o -name "*.aar" \) \
-                  ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
-                [ -n "$FOUND" ] && break
-              done
-              
-              # 兜底：宽泛搜索
-              if [ -z "$FOUND" ]; then
-                FOUND=$(find "$GRADLE_CACHE" -path "*$ARTIFACT/$VERSION*" \
-                  \( -name "${ARTIFACT}-${VERSION}.jar" -o -name "${ARTIFACT}-${VERSION}.aar" \
-                   -o -name "${ARTIFACT}-*.jar" -o -name "${ARTIFACT}-*.aar" \) \
-                  ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+          if [ -n "$LIVEKIT_AAR" ] && [ -f "$LIVEKIT_AAR" ]; then
+            unzip -qo "$LIVEKIT_AAR" -d "$LIVEKIT_DIR" 2>/dev/null || true
+            # 清理空 classes.jar
+            if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ ! -s "$LIVEKIT_DIR/classes.jar" ]; then
+              rm -f "$LIVEKIT_DIR/classes.jar"
+            fi
+            echo "[Step 2] ✓ LiveKit SDK found: $(basename $LIVEKIT_AAR) ($(du -h $LIVEKIT_AAR | cut -f1))"
+            ls -la "$LIVEKIT_DIR/" 2>/dev/null || true
+          else
+            echo "[Step 2] ⚠ LiveKit AAR not found in cache, will try alternative search..."
+            # 尝试直接在 runtime classpath 中查找
+            ./gradlew :printLiveKitPath --quiet 2>/dev/null || true
+            # 最终兜底: 从 releaseRuntimeClasspath 文件中找 livekit 相关的路径
+            if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
+              LIVEKIT_LINE=$(grep -i "livekit" "$ANDROID_ROOT/build/exports/deps-runtime.txt" | head -1)
+              if [ -n "$LIVEKIT_LINE" ] && [ -f "$LIVEKIT_LINE" ]; then
+                LIVEKIT_AAR="$LIVEKIT_LINE"
+                unzip -qo "$LIVEKIT_AAR" -d "$LIVEKIT_DIR" 2>/dev/null || true
+                echo "[Step 2] ✓ LiveKit from exportDeps: $LIVEKIT_AAR"
               fi
             fi
+          fi
 
-            # 处理找到的文件
-            if [ -n "$FOUND" ] && [ -f "$FOUND" ]; then
-              case "$FOUND" in
-                *.jar)
-                  cp "$FOUND" "$DEPS_JARS/" 2>/dev/null
-                  echo "  [JAR] $(basename "$FOUND") ($(du -h "$FOUND" | cut -f1))"
-                  ;;
-                *.aar)
-                  DEP_BASE="$(basename "$FOUND" .aar)"
-                  AAR_DIR="$DEPS_AARS/$DEP_BASE"
-                  mkdir -p "$AAR_DIR"
-                  unzip -qo "$FOUND" -d "$AAR_DIR" 2>/dev/null || true
-                  if [ -f "$AAR_DIR/classes.jar" ] && [ ! -s "$AAR_DIR/classes.jar" ]; then
-                    rm -f "$AAR_DIR/classes.jar"
-                  fi
-                  echo "  [AAR] $DEP_BASE ($(du -h "$FOUND" | cut -f1))"
-                  ;;
-              esac
-              TOTAL_FOUND=$((TOTAL_FOUND+1))
-            else
-              echo "  [??]  $dep (未找到)"
-            fi
-          done < "$DEPS_FILE"
-          
-          echo ""
-          echo "  找到: $TOTAL_FOUND, 未找到: $TOTAL_MISSING"
-          echo "  JARs: $(ls "$DEPS_JARS/"*.jar 2>/dev/null | wc -l)"
-          echo "  AARs: $(ls -d "$DEPS_AARS"/*/ 2>/dev/null | wc -l)"
-
-          # ---- Step 3: 合并所有 classes.jar ----
+          # ---- Step 3: 合并 classes.jar（插件 + 仅 LiveKit SDK） ----
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "[Step 3] Merging all classes.jar..."
+          echo "[Step 3] Merging classes..."
 
-          # 合并插件自身
-          if [ -f "$PLUGIN_EXTRACT/classes.jar" ]; then
+          # 插件自身代码
+          if [ -f "$PLUGIN_EXTRACT/classes.jar" ] && [ -s "$PLUGIN_EXTRACT/classes.jar" ]; then
             unzip -qo "$PLUGIN_EXTRACT/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-            echo "  ✓ plugin classes.jar ($(du -h "$PLUGIN_EXTRACT/classes.jar" | cut -f1))"
-          else
-            echo "  ⚠ plugin has no classes.jar (may be empty library)"
+            echo "  ✓ plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 合并依赖 JARs
-          JCOUNT=0
-          for jarfile in "$DEPS_JARS/"*.jar; do
-            [ -f "$jarfile" ] || continue
-            [ -s "$jarfile" ] || continue
-            unzip -qo "$jarfile" -d "$MERGED_CLASSES" 2>/dev/null || true
-            JCOUNT=$((JCOUNT+1))
-          done
-          echo "  ✓ $JCOUNT direct JARs merged"
+          # 仅合并 LiveKit SDK（不合并其他传递依赖！）
+          if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
+            unzip -qo "$LIVEKIT_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+            echo "  ✓ LiveKit SDK classes ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1))"
+          else
+            echo "  ⚠ No LiveKit classes.jar to merge!"
+          fi
 
-          # 合并依赖 AAR 的 classes.jar
-          ACOUNT=0
-          for aardir in "$DEPS_AARS"/*/; do
-            [ -d "$aardir" ] || continue
-            CJAR="$aardir/classes.jar"
-            if [ -f "$CJAR" ] && [ -s "$CJAR" ]; then
-              unzip -qo "$CJAR" -d "$MERGED_CLASSES" 2>/dev/null || true
-              ACOUNT=$((ACOUNT+1))
-            fi
-          done
-          echo "  ✓ $ACOUNT AAR classes.jar merged"
-
-          # 打包为合并后的 classes.jar（排除签名冲突）
-          CLASSES_MERGED="$WORK/classes-merged.jar"
-          echo "  Repacking → classes-merged.jar ..."
+          # 打包为最终的 classes.jar（清理签名文件）
+          CLASSES_OUT="$WORK/classes-semi-fat.jar"
           (cd "$MERGED_CLASSES" && \
-            rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF 2>/dev/null; \
-            jar cf "$CLASSES_MERGED" . )
-          echo "  ✓ classes-merged.jar: $(du -h "$CLASSES_MERGED" | cut -f1)"
+            rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro 2>/dev/null; \
+            jar cf "$CLASSES_OUT" . )
+          echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1)"
 
-          # ---- Step 4: 收集所有 .so 原生库 ----
+          # ---- Step 4: 收集 WebRTC .so 原生库（仅目标 ABI） ----
           JNI_OUT="$WORK/jni"
           mkdir -p "$JNI_OUT"
+          TARGET_ABIS="armeabi-v7a arm64-v8a"
           echo ""
-          echo "[Step 4] Collecting .so native libraries..."
+          echo "[Step 4] Collecting .so native libraries (abis: $TARGET_ABIS)..."
 
-          SO_TOTAL=0
-          # 从依赖 AAR 中提取 .so
-          for aardir in "$DEPS_AARS"/*/; do
-            [ -d "$aardir" ] || continue
-            if [ -d "$aardir/jni" ]; then
-              (cd "$aardir/jni" && find . -name "*.so" 2>/dev/null | while read so_rel; do
-                SO_SRC="$aardir/jni/$so_rel"
-                SO_DST="$JNI_OUT/$so_rel"
-                mkdir -p "$(dirname "$SO_DST")"
-                cp "$SO_SRC" "$SO_DST" 2>/dev/null
-              done) || true
-            fi
+          SO_COUNT=0
+
+          # 从 LiveKit SDK AAR 中提取 .so
+          if [ -d "$LIVEKIT_DIR/jni" ]; then
+            for abi in $TARGET_ABIS; do
+              if [ -d "$LIVEKIT_DIR/jni/$abi" ]; then
+                mkdir -p "$JNI_OUT/$abi"
+                cp "$LIVEKIT_DIR/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
+                ABI_SO=$(ls "$JNI_OUT/$abi/"*.so 2>/dev/null | wc -l)
+                SO_COUNT=$((SO_COUNT + ABI_SO))
+                echo "  ✓ $abi: $ABI_SO .so files"
+              fi
+            done
+          fi
+
+          # 搜索其他依赖 AAR 中的 .so（WebRTC 通常在 webrtc-android 的 AAR 中）
+          # 遍历 Gradle cache 中可能包含 .so 的 AAR
+          for so_search_dir in \
+            "$GRADLE_CACHE/modules-2/files-2.1/org/webrtc" \
+            "$GRADLE_CACHE/modules-2/files-2.1/com/github/webrtc" \
+            "$GRADLE_CACHE/modules-2/files-2.1/io/getstream" \
+            "$GRADLE_CACHE/modules-2/files-2.1/android-prefixed"; do
+            [ -d "$so_search_dir" ] || continue
+            # 找到该目录下的所有 AAR 文件
+            while IFS= read -r so_aar; do
+              [ -f "$so_aar" ] || continue
+              SO_TMP="$WORK/so-tmp-extract"
+              rm -rf "$SO_TMP" && mkdir -p "$SO_TMP"
+              unzip -qo "$so_aar" -d "$SO_TMP" 2>/dev/null || true
+              if [ -d "$SO_TMP/jni" ]; then
+                for abi in $TARGET_ABIS; do
+                  if [ -d "$SO_TMP/jni/$abi" ] && [ "$(ls $SO_TMP/jni/$abi/*.so 2>/dev/null)" != "" ]; then
+                    mkdir -p "$JNI_OUT/$abi"
+                    cp "$SO_TMP/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
+                    EXTRA=$(ls "$SO_TMP/jni/$abi/"*.so 2>/dev/null | wc -l)
+                    SO_COUNT=$((SO_COUNT + EXTRA))
+                    echo "  ✓ $abi from $(basename $so_aar): +$EXTRA .so"
+                  fi
+                done
+              fi
+              rm -rf "$SO_TMP"
+            done < <(find "$so_search_dir" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -5)
           done
-          # 从插件自身提取 .so（如果有）
-          if [ -d "$PLUGIN_EXTRACT/jni" ]; then
-            (cd "$PLUGIN_EXTRACT/jni" && find . -name "*.so" 2>/dev/null | while read so_rel; do
-              SO_SRC="$PLUGIN_EXTRACT/jni/$so_rel"
-              SO_DST="$JNI_OUT/$so_rel"
-              mkdir -p "$(dirname "$SO_DST")"
-              cp "$SO_SRC" "$SO_DST" 2>/dev/null
-            done) || true
-          fi
 
-          SO_TOTAL=$(find "$JNI_OUT" -name "*.so" 2>/dev/null | wc -l)
-          echo "  Total .so files: $SO_TOTAL"
-          if [ "$SO_TOTAL" -gt 0 ]; then
+          echo "  Total .so files: $SO_COUNT"
+          if [ "$SO_COUNT" -gt 0 ]; then
             find "$JNI_OUT" -name "*.so" -exec ls -lh {} \;
-          else
-            echo "  (无 .so — WebRTC native libraries 可能缺失!)"
           fi
 
-          # ---- Step 5: 组装最终 Fat AAR ----
-          FAT_FINAL="$WORK/fat-aar-final"
+          # ---- Step 5: 组装 Semi-Fat AAR ----
+          FAT_FINAL="$WORK/final-aar"
           mkdir -p "$FAT_FINAL"
           echo ""
-          echo "[Step 5] Assembling final Fat AAR..."
+          echo "[Step 5] Assembling final Semi-Fat AAR..."
 
           # AndroidManifest.xml
-          [ -f "$PLUGIN_EXTRACT/AndroidManifest.xml" ] && cp "$PLUGIN_EXTRACT/AndroidManifest.xml" "$FAT_FINAL/"
+          [ -f "$PLUGIN_EXTRACT/AndroidManifest.xml" ] && \
+            cp "$PLUGIN_EXTRACT/AndroidManifest.xml" "$FAT_FINAL/"
 
           # 合并后的 classes.jar
-          cp "$CLASSES_MERGED" "$FAT_FINAL/classes.jar"
+          cp "$CLASSES_OUT" "$FAT_FINAL/classes.jar"
 
-          # 所有 .so
+          # .so 原生库
           if [ -d "$JNI_OUT" ] && [ "$(ls -A "$JNI_OUT" 2>/dev/null)" ]; then
             cp -r "$JNI_OUT" "$FAT_FINAL/jni"
           fi
@@ -328,14 +273,21 @@ jobs:
           (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
 
           FAT_SIZE=$(du -h "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | cut -f1)
+          CLASSES_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
+          JNI_SIZE=$(du -sh "$JNI_OUT" 2>/dev/null | cut -f1 || echo "0")
+          
           echo ""
           echo "========================================="
-          echo "  Fat AAR 构建完成!"
-          echo "  文件: livekit-c2c-fat.aar"
-          echo "  大小: $FAT_SIZE"
+          echo "  Semi-Fat AAR 构建完成!"
+          echo "  文件:    livekit-c2c-fat.aar"
+          echo "  总大小:  $FAT_SIZE"
+          echo "  其中:"
+          echo "    classes.jar: $CLASSES_SIZE"
+          echo "    jni (.so):   ${JNI_SIZE:-0}"
+          echo "  说明: 仅含插件代码+LiveKit SDK, 不含androidx/kotlin等"
           echo "========================================="
           echo ""
-          echo "AAR 内容:"
+          echo "AAR 内容列表:"
           unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | tail -40
 
       - name: Upload Android AAR (Fat)
