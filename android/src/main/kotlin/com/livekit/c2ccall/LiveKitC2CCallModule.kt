@@ -82,10 +82,7 @@ class LiveKitC2CCallModule : UniModule() {
                 disconnectRoom()
 
                 Log.d(TAG, "[DEBUG] 步骤2: 获取 Context")
-                Log.d(TAG, "[DEBUG] 步骤2a: mUniSDKInstance=$mUniSDKInstance")
-                val uniContext = mUniSDKInstance?.context()
-                Log.d(TAG, "[DEBUG] 步骤2b: uniContext=$uniContext")
-                val appContext = uniContext?.applicationContext
+                val appContext = getApplicationCompatible()
                     ?: throw Exception("无法获取 Context")
                 Log.d(TAG, "[DEBUG] 步骤2完成: Context=${appContext.javaClass.simpleName}")
 
@@ -177,7 +174,7 @@ class LiveKitC2CCallModule : UniModule() {
                 disconnectRoom()
 
                 Log.d(TAG, "[DEBUG] answerC2C 步骤2: 获取 Context")
-                val appContext = mUniSDKInstance?.context()?.applicationContext
+                val appContext = getApplicationCompatible()
                     ?: throw Exception("无法获取 Context")
 
                 Log.d(TAG, "[DEBUG] answerC2C 步骤3: LiveKit.init")
@@ -292,6 +289,65 @@ class LiveKitC2CCallModule : UniModule() {
     }
 
     // ======================== 内部方法 ========================
+
+    /**
+     * 兼容 uni-app 5.x / HBuilderX 5.x 获取 Application Context
+     *
+     * 5.x 已移除 mUniSDKInstance 字段，改用 getContext() 或 UniSDKInstanceManager
+     */
+    private fun getApplicationCompatible(): android.content.Context? {
+        return try {
+            // 方案1：优先尝试 uni-app 5.x 新 API (UniSDKInstanceManager)
+            val managerClass = Class.forName("io.dcloud.feature.uniapp.common.UniSDKInstanceManager")
+            val getCurrentMethod = managerClass.getMethod("getCurrentInstance")
+            val instance = getCurrentMethod.invoke(null)
+            if (instance != null) {
+                val getContextMethod = instance.javaClass.getMethod("getContext")
+                val ctx = getContextMethod.invoke(instance) as? android.content.Context
+                if (ctx != null) return ctx.applicationContext
+            }
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "[COMPAT] UniSDKInstanceManager 获取失败，尝试 fallback: ${e.message}")
+            tryFallbackContext()
+        }
+    }
+
+    /**
+     * 兼容 uni-app 5.x 获取 Context（非 Application 级别）
+     */
+    private fun getCompatibleContext(): android.content.Context? {
+        return try {
+            val managerClass = Class.forName("io.dcloud.feature.uniapp.common.UniSDKInstanceManager")
+            val getCurrentMethod = managerClass.getMethod("getCurrentInstance")
+            val instance = getCurrentMethod.invoke(null)
+            if (instance != null) {
+                val getContextMethod = instance.javaClass.getMethod("getContext")
+                getContextMethod.invoke(instance) as? android.content.Context
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "[COMPAT] 获取 Context 失败: ${e.message}")
+            tryFallbackContext()
+        }
+    }
+
+    /**
+     * Fallback：通过反射获取 mUniSDKInstance（兼容旧版 uni-app SDK）
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun tryFallbackContext(): android.content.Context? {
+        return try {
+            val field = this@LiveKitC2CCallModule.javaClass.superclass?.declaredFields
+                ?.first { it.name == "mUniSDKInstance" }
+            field?.isAccessible = true
+            val instance = field?.get(this@LiveKitC2CCallModule) ?: return null
+            val getContextMethod = instance.javaClass.getMethod("getContext")
+            getContextMethod.invoke(instance) as? android.content.Context
+        } catch (e: Exception) {
+            Log.e(TAG, "[COMPAT] Fallback 也失败: ${e.message}")
+            null
+        }
+    }
 
     /**
      * 处理房间事件
@@ -423,7 +479,7 @@ class LiveKitC2CCallModule : UniModule() {
         if (ringPath.isNullOrEmpty()) return
 
         try {
-            val context = mUniSDKInstance?.context() ?: return
+            val context = getCompatibleContext() ?: return
             ringPlayer = MediaPlayer().apply {
                 setDataSource(context, android.net.Uri.parse(ringPath))
                 isLooping = true
@@ -477,7 +533,7 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun announceForAccessibility(message: String) {
         try {
-            val context = mUniSDKInstance?.context() ?: return
+            val context = getCompatibleContext() ?: return
             val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager ?: return
             if (am.isEnabled) {
                 val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_ANNOUNCEMENT)
