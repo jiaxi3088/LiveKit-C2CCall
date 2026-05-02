@@ -14,7 +14,7 @@ import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
-import io.livekit.android.room.track.Track.Kind as TrackKind
+import io.livekit.android.room.track.Kind as TrackKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -442,7 +442,7 @@ class LiveKitC2CCallModule : UniModule() {
 
             val methods = clazz.declaredMethods.map { "${it.name}(${it.parameterTypes.joinToString(",") { it.simpleName }})" }
             Log.w(TAG, "[COMPAT] UniModule 方法列表 [${methods.size}]:")
-            methods.forEach { Log.w(TAG, "[COMPAT]   - $it")")
+            methods.forEach { Log.w(TAG, "[COMPAT]   - $it") }
 
             val parentMethods = clazz.superclass?.declaredMethods?.map { it.name }?.distinct()
             Log.w(TAG, "[COMPAT] 父类方法 [${parentMethods?.size}]: ${parentMethods?.joinToString(", ")}")
