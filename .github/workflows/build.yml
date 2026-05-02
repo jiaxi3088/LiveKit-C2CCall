@@ -130,20 +130,20 @@ jobs:
           else
             echo "[Step 2] ⚠ exportDeps failed or empty, using fallback list from Gradle cache"
             # Fallback: 用硬编码的 Maven 坐标列表从缓存搜索
-            cat > "$DEPS_FILE" << '__EOF__'
-io.livekit:livekit-android:2.25.1
-androidx.appcompat:appcompat:1.6.1
-androidx.core:core-ktx:1.13.1
-androidx.lifecycle:lifecycle-runtime-ktx:2.8.7
-androidx.lifecycle:lifecycle-common:2.8.7
-org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1
-org.jetbrains.kotlin:kotlin-stdlib:2.0.21
-org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.1
-com.google.code.gson:gson:2.11.0
-com.squareup.okhttp3:okhttp:4.12.0
-com.squareup.okio:okhttp-jvm:4.12.0
-com.squareup.okio:okio:3.9.1
-__EOF__
+            printf '%s\n' \
+              "io.livekit:livekit-android:2.25.1" \
+              "androidx.appcompat:appcompat:1.6.1" \
+              "androidx.core:core-ktx:1.13.1" \
+              "androidx.lifecycle:lifecycle-runtime-ktx:2.8.7" \
+              "androidx.lifecycle:lifecycle-common:2.8.7" \
+              "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1" \
+              "org.jetbrains.kotlin:kotlin-stdlib:2.0.21" \
+              "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.1" \
+              "com.google.code.gson:gson:2.11.0" \
+              "com.squareup.okhttp3:okhttp:4.12.0" \
+              "com.squareup.okio:okhttp-jvm:4.12.0" \
+              "com.squareup.okio:okio:3.9.1" \
+              > "$DEPS_FILE"
           fi
 
           echo "=== Runtime dependencies ($(wc -l < "$DEPS_FILE") lines) ==="
