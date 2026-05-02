@@ -95,7 +95,9 @@ jobs:
         run: |
           set -e
 
-          # ====== Semi-Fat AAR: 只打包 LiveKit SDK 核心 + WebRTC .so ======
+          # ====== Semi-Fat AAR: 插件代码 + WebRTC .so 兜底 ======
+          # LiveKit SDK 类 + WebRTC 类 + .so 均由 package.json Maven 依赖提供
+          # 此 AAR 只含: 插件代码 + (可选) WebRTC .so 兜底
           # 不包含: androidx / kotlin-stdlib / gson / okHttp (HBuilderX基座已自带)
           # 预期大小: ~5-8MB (vs 全量Fat ~34MB)
 
@@ -196,7 +198,9 @@ jobs:
             echo "[Step 2b] ⚠ android-prefixed AAR not found in cache!"
           fi
 
-          # ---- Step 3: 合并 classes.jar（插件 + LiveKit SDK + WebRTC） ----
+          # ---- Step 3: 合并 classes.jar（仅插件代码，不含 LiveKit SDK） ----
+          # LiveKit SDK 类由 package.json 的 Maven 依赖提供（HBuilderX 云打包时自动解析）
+          # 若合并此处会导致 checkReleaseDuplicateClasses 失败
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
@@ -208,20 +212,15 @@ jobs:
             echo "  ✓ plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 仅合并 LiveKit SDK（不合并其他传递依赖！）
-          if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
-            unzip -qo "$LIVEKIT_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-            echo "  ✓ LiveKit SDK classes ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1))"
-          else
-            echo "  ⚠ No LiveKit classes.jar to merge!"
-          fi
+          # 不再合并 LiveKit SDK classes.jar（由 Maven 依赖提供）
+          echo "  ⊘ LiveKit SDK classes skipped (provided by Maven dependency in package.json)"
 
-          # 合并 android-prefixed (WebRTC) — 包含 livekit/org/webrtc/* 类定义
+          # 合并 android-prefixed (WebRTC) 类 — 兜底：HBuilderX 可能不传递 WebRTC 的类定义
           if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
             unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
             echo "  ✓ WebRTC SDK (android-prefixed) classes ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
           else
-            echo "  ⚠ No WebRTC classes.jar to merge!"
+            echo "  ⚠ No WebRTC classes.jar (relying on Maven dependency)"
           fi
 
           # 打包为最终的 classes.jar（清理签名文件）
@@ -231,7 +230,8 @@ jobs:
             jar cf "$CLASSES_OUT" . )
           echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1)"
 
-          # ---- Step 4: 收集 WebRTC .so 原生库（仅目标 ABI） ----
+          # ---- Step 4: 收集 WebRTC .so 原生库（仅目标 ABI，兜底用） ----
+          # HBuilderX 的 Maven 依赖通常能传递 .so，但作为安全兜底仍然打包
           JNI_OUT="$WORK/jni"
           mkdir -p "$JNI_OUT"
           TARGET_ABIS="armeabi-v7a arm64-v8a"
@@ -240,17 +240,9 @@ jobs:
 
           SO_COUNT=0
 
-          # 从 LiveKit SDK AAR 中提取 .so
+          # 从 LiveKit SDK AAR 中提取 .so（Maven 依赖已提供，此为兜底）
           if [ -d "$LIVEKIT_DIR/jni" ]; then
-            for abi in $TARGET_ABIS; do
-              if [ -d "$LIVEKIT_DIR/jni/$abi" ]; then
-                mkdir -p "$JNI_OUT/$abi"
-                cp "$LIVEKIT_DIR/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
-                ABI_SO=$(ls "$JNI_OUT/$abi/"*.so 2>/dev/null | wc -l)
-                SO_COUNT=$((SO_COUNT + ABI_SO))
-                echo "  ✓ $abi: $ABI_SO .so files from livekit-android"
-              fi
-            done
+            echo "  ⊘ LiveKit jni/ found but skipped (Maven dependency provides it)"
           fi
 
           # 从 android-prefixed (WebRTC) AAR 中提取 .so（关键：liblkjingle_peerconnection_so.so）
@@ -339,7 +331,7 @@ jobs:
           echo "  其中:"
           echo "    classes.jar: $CLASSES_SIZE"
           echo "    jni (.so):   ${JNI_SIZE:-0}"
-          echo "  说明: 含插件代码+LiveKit SDK+WebRTC SDK, 不含androidx/kotlin等"
+          echo "  说明: 插件代码+WebRTC兜底, LiveKit SDK由package.json Maven依赖提供"
           echo "========================================="
           echo ""
           echo "AAR 内容列表:"
