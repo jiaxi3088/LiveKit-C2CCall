@@ -14,7 +14,7 @@ import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
-import io.livekit.android.room.track.Kind as TrackKind
+import io.livekit.android.room.track.Track.Kind as TrackKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
