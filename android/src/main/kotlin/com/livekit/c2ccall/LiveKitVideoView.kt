@@ -5,11 +5,8 @@ import android.util.AttributeSet
 import android.util.Log
 import android.view.View
 import android.widget.FrameLayout
-import io.dcloud.feature.uniapp.annotation.UniComponent
+import io.dcloud.feature.uniapp.annotation.UniComponentAnnotation
 import io.dcloud.feature.uniapp.common.UniComponent as UniComponentBase
-import org.webrtc.EglBase
-import org.webrtc.RendererCommon
-import org.webrtc.SurfaceViewRenderer
 
 /**
  * LiveKit 视频渲染原生 nvue 组件
@@ -20,8 +17,10 @@ import org.webrtc.SurfaceViewRenderer
  *
  * 属性：
  *   - type: "local" | "remote"（默认 "remote"）
+ *
+ * 内部实现：通过反射创建 org.webrtc.SurfaceViewRenderer，避免编译期依赖 WebRTC 库。
  */
-@UniComponent(props = ["type"])
+@UniComponentAnnotation(props = ["type"])
 class LiveKitVideoView @JvmOverloads constructor(
     context: Context,
     attributeSet: AttributeSet? = null,
@@ -31,23 +30,39 @@ class LiveKitVideoView @JvmOverloads constructor(
     companion object {
         private const val TAG = "LKVideoView"
 
-        /** 共享 EglBase：所有 SurfaceViewRenderer 共享同一个 EGL 上下文 */
-        private var sharedEglBase: EglBase? = null
+        /** 共享 EglBase 实例（通过反射创建） */
+        private var sharedEglBase: Any? = null
 
-        @Synchronized
-        fun getSharedEglBase(): EglBase {
+        /**
+         * 获取/创建共享 EglBase（所有 SurfaceViewRenderer 共享同一 EGL 上下文）
+         */
+        @JvmStatic
+        fun getSharedEglBase(): Any {
             if (sharedEglBase == null) {
-                sharedEglBase = EglBase.create()
-                Log.i(TAG, "Shared EglBase created")
+                try {
+                    val eglBaseClass = Class.forName("org.webrtc.EglBase")
+                    val createMethod = eglBaseClass.getMethod("create")
+                    sharedEglBase = createMethod.invoke(null)
+                    Log.i(TAG, "Shared EglBase created via reflection")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to create EglBase: ${e.message}", e)
+                    throw RuntimeException("WebRTC not available. Ensure livekit-android dependency is correctly resolved.", e)
+                }
             }
             return sharedEglBase!!
         }
 
-        @Synchronized
+        /**
+         * 释放共享 EglBase（在 Activity 销毁时调用）
+         */
+        @JvmStatic
         fun releaseSharedEglBase() {
             try {
-                sharedEglBase?.release()
-                Log.i(TAG, "Shared EglBase released")
+                sharedEglBase?.let { eglBase ->
+                    val releaseMethod = eglBase.javaClass.getMethod("release")
+                    releaseMethod.invoke(eglBase)
+                    Log.i(TAG, "Shared EglBase released")
+                }
             } catch (_: Exception) {
             }
             sharedEglBase = null
@@ -59,13 +74,68 @@ class LiveKitVideoView @JvmOverloads constructor(
 
         @JvmStatic var remoteViewInstance: LiveKitVideoView? = null
             private set
+
+        /**
+         * 通过反射创建 SurfaceViewRenderer 实例
+         */
+        fun createSurfaceViewRenderer(context: Context): Any {
+            try {
+                val svrClass = Class.forName("org.webrtc.SurfaceViewRenderer")
+                val constructor = svrClass.getConstructor(Context::class.java)
+                return constructor.newInstance(context)
+            } catch (e: Exception) {
+                throw RuntimeException("Failed to create SurfaceViewRenderer: ${e.message}", e)
+            }
+        }
+
+        /**
+         * 初始化 SurfaceViewRenderer（init + scalingType + hardwareScaler）
+         */
+        fun initSurfaceViewRenderer(renderer: Any, context: Context) {
+            try {
+                val eglBase = getSharedEglBase()
+                val eglContextField = eglBase.javaClass.getField("eglBaseContext")
+                val eglContext = eglContextField.get(eglBase)
+
+                // renderer.init(eglBase.eglBaseContext, null)
+                val initMethod = renderer.javaClass.getMethod("init", eglContext.javaClass, Class.forName("org.webrtc.RendererCommon$RendererEvents"))
+                initMethod.invoke(renderer, eglContext, null)
+
+                // setScalingType(SCALE_ASPECT_FIT)
+                val rcClass = Class.forName("org.webrtc.RendererCommon")
+                val stClass = Class.forName("org.webrtc.RendererCommon\$ScalingType")
+                val scaleFit = stClass.getField("SCALE_ASPECT_FIT").get(null)
+                val setScalingMethod = renderer.javaClass.getMethod("setScalingType", stClass)
+                setScalingMethod.invoke(renderer, scaleFit)
+
+                // setEnableHardwareScaler(true)
+                val setHwMethod = renderer.javaClass.getMethod("setEnableHardwareScaler", java.lang.Boolean.TYPE)
+                setHwMethod.invoke(renderer, true)
+
+                Log.d(TAG, "SurfaceViewRenderer initialized OK")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to init SurfaceViewRenderer: ${e.message}", e)
+                throw RuntimeException("Init renderer failed", e)
+            }
+        }
+
+        /**
+         * 释放 SurfaceViewRenderer
+         */
+        fun releaseSurfaceViewRenderer(renderer: Any?) {
+            try {
+                renderer?.let {
+                    val releaseMethod = it.javaClass.getMethod("release")
+                    releaseMethod.invoke(it)
+                }
+            } catch (_: Exception) {}
+        }
     }
 
-    private var renderer: SurfaceViewRenderer? = null
+    /** 渲染器实例（实际是 org.webrtc.SurfaceViewRenderer，用 Any 类型持有以避免 import） */
+    private var renderer: Any? = null
     internal var viewType: String = "remote"
         private set
-
-    // ==================== 初始化 ====================
 
     init {
         val container = FrameLayout(context).apply {
@@ -75,22 +145,20 @@ class LiveKitVideoView @JvmOverloads constructor(
             )
         }
 
-        renderer = SurfaceViewRenderer(context).apply {
-            init(getSharedEglBase().eglBaseContext, null)
-            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-            isEnableHardwareScaler = true
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-        container.addView(renderer!!)
+        // 通过反射创建 SurfaceViewRenderer 并初始化
+        renderer = createSurfaceViewRenderer(context)
+        initSurfaceViewRenderer(renderer!!, context)
+
+        val rendererView = renderer as View
+        rendererView.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        container.addView(rendererView)
         setContainerView(container)
 
-        Log.d(TAG, "LiveKitVideoView init OK")
+        Log.d(TAG, "LiveKitVideoView init OK (renderer created via reflection)")
     }
-
-    // ==================== 生命周期回调 ====================
 
     override fun onCreated() {
         super.onCreated()
@@ -111,18 +179,16 @@ class LiveKitVideoView @JvmOverloads constructor(
             "remote" -> if (remoteViewInstance === this) remoteViewInstance = null
         }
 
-        try {
-            renderer?.release()
-        } catch (_: Exception) {
-        }
+        releaseSurfaceViewRenderer(renderer)
         renderer = null
         Log.d(TAG, "onDestroy: type=$viewType")
     }
 
-    // ==================== 公共 API ====================
-
     /**
-     * 获取内部 SurfaceViewRenderer，用于 Module 绑定 VideoTrack
+     * 获取内部渲染器实例（org.webrtc.SurfaceViewRenderer，类型为 Any）
+     * 用于 Module 通过反射调用 addSink/removeSink
      */
-    fun getRenderer(): SurfaceViewRenderer? = renderer
+    fun getRenderer(): Any? = renderer
+
+    fun getViewType(): String = viewType
 }

@@ -16,8 +16,6 @@ import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
 import io.livekit.android.room.participant.Participant
 import io.livekit.android.room.track.Track
-import io.livekit.android.room.track.VideoTrack
-import org.webrtc.VideoTrack as WebrtcVideoTrack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -628,57 +626,35 @@ class LiveKitC2CCallModule : UniModule() {
         }
     }
 
+    // ==================== 反射视频绑定（无需 org.webrtc 编译期依赖）====================
+
     /**
-     * 将 TrackPublication 的 videoTrack 绑定到 SurfaceViewRenderer
+     * 将 VideoTrack 绑定到渲染器 (SurfaceViewRenderer)
      * 
-     * 核心逻辑：
-     * 1. 从 publication 获取 LiveKit VideoTrack
-     * 2. 尝试转为 WebRTC org.webrtc.VideoTrack (它有 addSink/removeSink 方法)
-     * 3. 调用 addSink(renderer) 完成绑定
+     * 策略：
+     * 1. 尝试直接在 track 上找 addSink(SurfaceViewRenderer) 方法
+     * 2. 如果 track 是 LiveKit VideoTrack 包装类，尝试获取其内部 webrtc track
      */
     private fun bindTrackToRenderer(
         publication: io.livekit.android.room.track.TrackPublication,
-        renderer: org.webrtc.SurfaceViewRenderer
+        renderer: Any
     ) {
         try {
             val track = publication.track ?: run {
-                Log.w(TAG, "[TRACK] publication.track is null (not subscribed?)")
+                Log.w(TAG, "[TRACK] publication.track is null")
                 return
             }
             
-            when (track) {
-                is WebrtcVideoTrack -> {
-                    track.addSink(renderer)
-                    Log.d(TAG, "[TRACK] OK bound via WebRTC VideoTrack.addSink")
+            // 策略1: 直接反射调用 addSink
+            if (invokeAddSink(track, renderer)) return
+            
+            // 策略2: LiveKit VideoTrack 可能包装了 WebRTC VideoTrack，尝试获取内部字段/方法
+            tryGetInnerTrack(track)?.let { inner ->
+                if (invokeAddSink(inner, renderer)) {
+                    Log.d(TAG, "[TRACK] OK bound via inner track addSink")
                 }
-                is VideoTrack -> {
-                    // LiveKit VideoTrack — 尝试获取底层 WebRTC track
-                    val webrtcTrack = try {
-                        (track as? WebrtcVideoTrack)
-                    } catch (e: Exception) {
-                        null
-                    }
-                    if (webrtcTrack != null) {
-                        webrtcTrack.addSink(renderer)
-                        Log.d(TAG, "[TRACK] OK bound via cast to WebRTC VideoTrack")
-                    } else {
-                        // 最后尝试：反射调用 addSink
-                        try {
-                            val method = track.javaClass.methods.find { it.name == "addSink" }
-                            if (method != null) {
-                                method.invoke(track, renderer)
-                                Log.d(TAG, "[TRACK] OK bound via reflection addSink")
-                            } else {
-                                Log.w(TAG, "[TRACK] Cannot bind: no addSink found on ${track.javaClass.name}")
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "[TRACK] Reflection bind failed: ${e.message}")
-                        }
-                    }
-                }
-                else -> {
-                    Log.w(TAG, "[TRACK] Unexpected track type: ${track.javaClass.name}")
-                }
+            } ?: run {
+                Log.w(TAG, "[TRACK] Cannot bind: no addSink found on ${track.javaClass.name} or inner track")
             }
         } catch (e: Exception) {
             Log.e(TAG, "[TRACK] bindTrackToRenderer error: ${e.message}", e)
@@ -686,29 +662,89 @@ class LiveKitC2CCallModule : UniModule() {
     }
 
     /**
-     * 解绑 TrackPublication 的 videoTrack 与 SurfaceViewRenderer
+     * 从 VideoTrack 中尝试获取内部 WebRTC VideoTrack
+     * 常见模式：LiveKit 的 VideoTrack 可能持有内部 webrtc 字段或通过方法暴露
+     */
+    private fun tryGetInnerTrack(track: Any): Any? {
+        // 尝试常见字段名
+        for (fieldName in listOf("videoTrack", "webrtcTrack", "internalTrack", "track")) {
+            try {
+                val field = findFieldRecursive(track.javaClass, fieldName)
+                field?.isAccessible = true
+                val value = field?.get(track)
+                if (value != null && hasAddSink(value)) return value
+            } catch (_: Exception) {}
+        }
+        
+        // 尝试通过 getter 方法
+        for (methodName in listOf("getVideoTrack", "getWebrtcTrack", "getInternalTrack")) {
+            try {
+                val method = track.javaClass.methods.find { it.name == methodName && it.parameterCount == 0 }
+                val value = method?.invoke(track)
+                if (value != null && hasAddSink(value)) return value
+            } catch (_: Exception) {}
+        }
+
+        return null
+    }
+
+    /** 检查对象是否有 addSink 方法 */
+    private fun hasAddSink(obj: Any): Boolean {
+        return obj.javaClass.methods.any { it.name == "addSink" && it.parameterCount == 1 }
+    }
+
+    /** 反射调用 addSink(renderer) */
+    private fun invokeAddSink(track: Any, renderer: Any): Boolean {
+        return try {
+            // 查找 addSink 方法 — 接受 VideoSink 参数（SurfaceViewRenderer 实现了它）
+            val sinkClass = Class.forName("org.webrtc.VideoSink")
+            val method = track.javaClass.methods.find {
+                it.name == "addSink" && it.parameterCount == 1 &&
+                        sinkClass.isAssignableFrom(it.parameterTypes[0])
+            }
+            if (method != null) {
+                method.invoke(track, renderer)
+                Log.d(TAG, "[TRACK] OK bound via ${track.javaClass.simpleName}.addSink")
+                true
+            } else false
+        } catch (e: Exception) {
+            Log.d(TAG, "[TRACK] invokeAddSink failed: ${e.message}")
+            false
+        }
+    }
+
+    /** 反射调用 removeSink(renderer) */
+    private fun invokeRemoveSink(track: Any, renderer: Any): Boolean {
+        return try {
+            val method = track.javaClass.methods.find {
+                it.name == "removeSink" && it.parameterCount == 1
+            }
+            if (method != null) {
+                method.invoke(track, renderer)
+                true
+            } else false
+        } catch (_: Exception) { false }
+    }
+
+    /**
+     * 解绑 Track 的 videoTrack 与渲染器
      */
     private fun unbindTrackFromRenderer(
         publication: io.livekit.android.room.track.TrackPublication,
-        renderer: org.webrtc.SurfaceViewRenderer?
+        renderer: Any?
     ) {
         if (renderer == null) return
         try {
             val track = publication.track ?: return
+            invokeRemoveSink(track, renderer)
             
-            if (track is WebrtcVideoTrack) {
-                track.removeSink(renderer)
-            } else {
-                try {
-                    val method = track.javaClass.methods.find { it.name == "removeSink" }
-                    method?.invoke(track, renderer)
-                } catch (_: Exception) {}
-            }
+            // 也尝试解绑 inner track
+            tryGetInnerTrack(track)?.let { invokeRemoveSink(it, renderer) }
         } catch (_: Exception) {}
     }
 
     /** 绑定本地参与者的视频轨到 local renderer */
-    private fun bindVideoTrackToLocalRenderer(r: Room, localRenderer: org.webrtc.SurfaceViewRenderer?) {
+    private fun bindVideoTrackToLocalRenderer(r: Room, localRenderer: Any?) {
         val pub = findTrackPublication(r.localParticipant, Track.Kind.VIDEO)
         if (pub != null && localRenderer != null) {
             bindTrackToRenderer(pub, localRenderer)
@@ -717,7 +753,7 @@ class LiveKitC2CCallModule : UniModule() {
     }
 
     /** 绑定参与者的视频轨到指定 renderer */
-    private fun bindParticipantVideoToRenderer(participant: Participant, renderer: org.webrtc.SurfaceViewRenderer?) {
+    private fun bindParticipantVideoToRenderer(participant: Participant, renderer: Any?) {
         val pub = findTrackPublication(participant, Track.Kind.VIDEO)
         if (pub != null && renderer != null) {
             bindTrackToRenderer(pub, renderer)
@@ -725,11 +761,24 @@ class LiveKitC2CCallModule : UniModule() {
     }
 
     /** 解绑参与者的视频轨与指定 renderer */
-    private fun unbindParticipantVideo(participant: Participant, renderer: org.webrtc.SurfaceViewRenderer?) {
+    private fun unbindParticipantVideo(participant: Participant, renderer: Any?) {
         val pub = findTrackPublication(participant, Track.Kind.VIDEO)
         if (pub != null) {
             unbindTrackFromRenderer(pub, renderer)
         }
+    }
+
+    /** 递归查找字段（含父类） */
+    @Suppress("UNCHECKED_CAST")
+    private fun findFieldRecursive(clazz: Class<*>, fieldName: String): java.lang.reflect.Field? {
+        var current: Class<*>? = clazz
+        while (current != null && current != Any::class.java) {
+            try {
+                return current.getDeclaredField(fieldName)
+            } catch (_: Exception) {}
+            current = current.superclass
+        }
+        return null
     }
 
     /**
