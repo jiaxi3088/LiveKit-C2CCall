@@ -1,4 +1,4 @@
-package io.dcloud.feature.uniapp.common;
+package io.dcloud.feature.uniapp.ui.component;
 
 import android.content.Context;
 import android.util.AttributeSet;

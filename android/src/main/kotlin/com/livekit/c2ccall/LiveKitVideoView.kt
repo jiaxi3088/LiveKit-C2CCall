@@ -6,7 +6,7 @@ import android.util.Log
 import android.view.View
 import android.widget.FrameLayout
 import io.dcloud.feature.uniapp.annotation.UniComponentAnnotation
-import io.dcloud.feature.uniapp.common.UniComponent as UniComponentBase
+import io.dcloud.feature.uniapp.ui.component.UniComponent as UniComponentBase
 
 /**
  * LiveKit 视频渲染原生 nvue 组件
