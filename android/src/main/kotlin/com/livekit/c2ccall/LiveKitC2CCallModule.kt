@@ -294,13 +294,13 @@ class LiveKitC2CCallModule : UniModule() {
     @UniJSMethod(uiThread = true)
     fun initRenderers(callback: UniJSCallback?) {
         try {
-            // 确保共享 EglBase 已初始化
-            LiveKitVideoView.getSharedEglBase()
+            val webrtcOk = LiveKitVideoView.isWebRtcAvailable()
+            Log.d(TAG, "[RENDER] WebRTC available: $webrtcOk")
 
             val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
             val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
 
-            Log.d(TAG, "[RENDER] 渲染组件状态: local=${if (localRenderer != null) "✅" else "⚠️ 未检测到 <livekit-video-view type='local'>"}, remote=${if (remoteRenderer != null) "✅" else "⚠️ 未检测到 <livekit-video-view type='remote'>"}")
+            Log.d(TAG, "[RENDER] 渲染组件状态: local=${if (localRenderer != null) "✅" else "⚠️ 未检测到或WebRTC不可用 <livekit-video-view type='local'>"}, remote=${if (remoteRenderer != null) "✅" else "⚠️ 未检测到或WebRTC不可用 <livekit-video-view type='remote'>"}")
 
             // 绑定已有的媒体轨道到渲染组件
             scope.launch {
@@ -548,8 +548,12 @@ class LiveKitC2CCallModule : UniModule() {
         val r = room ?: return
 
         // 7a. 确保共享 EglBase 已初始化（由 LiveKitVideoView 组件管理）
-        LiveKitVideoView.getSharedEglBase()
-        Log.d(TAG, "[DEBUG] 步骤7a: EglBase 就绪")
+        if (LiveKitVideoView.isWebRtcAvailable()) {
+            LiveKitVideoView.getSharedEglBase()
+        } else {
+            Log.w(TAG, "[DEBUG] 步骤7a: WebRTC not available in runtime, video rendering disabled")
+        }
+        Log.d(TAG, "[DEBUG] 步骤7a: EglBase check done")
 
         // 7b. 发布本地摄像头 + 麦克风轨道
         scope.launch {
