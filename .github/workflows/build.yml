@@ -325,7 +325,7 @@ jobs:
 
           should_skip_embedded_classes_dep() {
             case "$1" in
-              appcompat-*.aar|appcompat-resources-*.aar|fragment-*.aar|activity-*.aar|drawerlayout-*.aar|emoji2-*.aar|emoji2-views-helper-*.aar|vectordrawable-*.aar|vectordrawable-animated-*.aar|viewpager-*.aar|customview-*.aar|loader-*.aar|cursoradapter-*.aar|interpolator-*.aar|versionedparcelable-*.aar|profileinstaller-*.aar|startup-runtime-*.aar|tracing-*.aar|savedstate-*.aar|core-*.aar|core-ktx-*.aar|core-common-*.jar|core-runtime-*.aar|lifecycle-*.aar|lifecycle-*.jar|annotation-*.jar|annotation-jvm-*.jar|annotation-experimental-*.aar|resourceinspection-annotation-*.jar|collection-*.jar|concurrent-futures-*.jar|listenablefuture-*.jar)
+              appcompat-*.aar|appcompat-resources-*.aar|fragment-*.aar|activity-*.aar|drawerlayout-*.aar|emoji2-*.aar|emoji2-views-helper-*.aar|vectordrawable-*.aar|vectordrawable-animated-*.aar|viewpager-*.aar|customview-*.aar|loader-*.aar|cursoradapter-*.aar|interpolator-*.aar|versionedparcelable-*.aar|profileinstaller-*.aar|startup-runtime-*.aar|tracing-*.aar|savedstate-*.aar|core-*.aar|core-ktx-*.aar|core-common-*.jar|core-runtime-*.aar|lifecycle-*.aar|lifecycle-*.jar|annotation-*.jar|annotation-jvm-*.jar|annotation-experimental-*.aar|annotations-*.jar|resourceinspection-annotation-*.jar|collection-*.jar|concurrent-futures-*.jar|listenablefuture-*.jar|kotlin-stdlib*.jar|kotlin-stdlib-*.jar|kotlin-stdlib-*.aar|kotlinx-coroutines-*.jar|kotlinx-coroutines-*.aar|gson-*.jar|gson-*.aar|okhttp-*.jar|okhttp-*.aar|okio-*.jar|okio-*.aar|okio-jvm-*.jar)
                 return 0
                 ;;
             esac
@@ -420,14 +420,23 @@ jobs:
           echo ""
           echo "[Step 3c] v8 Conservative Full Pack (no blacklist)..."
           
-          # v8: Conservative Full Pack - only remove _COROUTINE
+          # v8: Conservative Full Pack - remove known HBuilderX conflicts + _COROUTINE
           TOTAL_CLASSES=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
           STRIPPED_PKGS=""
+
+          # 删除与 HBuilderX 基座冲突的包（HBuilderX 已内置这些库的不同版本）
+          for CONFLICT_PKG in okhttp3 okio org/intellij/lang/annotations org/jetbrains/annotations; do
+            if [ -d "$MERGED_CLASSES/$CONFLICT_PKG" ]; then
+              cnt=$(find "$MERGED_CLASSES/$CONFLICT_PKG" -name "*.class" 2>/dev/null | wc -l)
+              rm -rf "$MERGED_CLASSES/$CONFLICT_PKG" 2>/dev/null || true
+              STRIPPED_PKGS="${STRIPPED_PKGS}    ${CONFLICT_PKG}/ (${cnt} classes)\n"
+            fi
+          done
 
           if [ -d "$MERGED_CLASSES/_COROUTINE" ]; then
             coro_cnt=$(find "$MERGED_CLASSES/_COROUTINE" -name "*.class" 2>/dev/null | wc -l)
             rm -rf "$MERGED_CLASSES/_COROUTINE" 2>/dev/null || true
-            STRIPPED_PKGS="    _COROUTINE/ ($coro_cnt classes)\n"
+            STRIPPED_PKGS="${STRIPPED_PKGS}    _COROUTINE/ ($coro_cnt classes)\n"
           fi
 
           FINAL_CLASSES=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
