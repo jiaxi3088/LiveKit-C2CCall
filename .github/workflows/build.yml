@@ -98,12 +98,19 @@ jobs:
           # ====== Full Fat AAR: 全部依赖自包含 v7 ======
           # 不再依赖 HBuilderX 解析 Maven 依赖
           # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + arm64 .so
-          # 预期大小: ~15-20MB (v7: 广泛前缀黑名单，彻底杜绝 Duplicate class)
-          # 
           # ═════════════════════════════════════════════════════
-          # v7 核心变更: 广泛前缀黑名单 (Prefix-based Blacklist)
+          # v7.2 核心变更: 修补遗漏的 _COROUTINE 顶层包
           # ═════════════════════════════════════════════════════
-          # 不再逐个列举子包(永远会漏)，改为按顶级前缀删除整个通用库家族:
+          # v7.1 后 HBuilderX 5.05 云打包仍报错:
+          #   Duplicate class _COROUTINE.ArtificialStackFiles found in
+          #   kotlinx-coroutines-core-jvm-1.8.1.jar and livekit-c2c.aar
+          #
+          # 根因: kotlinx-coroutines 内部使用特殊的 _COROUTINE 顶层包存放
+          #       调试/边界标记类, 这些类不在 kotlinx/ 子目录下!
+          #       当前前缀黑名单只匹配 kotlin/ 和 kotlinx/, 遗漏了 _COROUTINE/
+          #
+          # 修复: 新增 "_COROUTINE" 前缀到黑名单
+          # 预期大小: ~15-20MB (v7.2: 补充 _COROUTINE 前缀)
           #
           #   前缀              覆盖范围                          HBuilderX 已有版本示例
           #   ─────────────────────────────────────────────────────────────────────
@@ -401,7 +408,10 @@ jobs:
           STRIPPED_PKGS=""
           
           # 定义黑名单前缀 (每个都是顶级目录名)
+          # v7.2: 新增 _COROUTINE (kotlinx-coroutines 内部调试类的顶层包)
+          #       这些类如 _COROUTINE.ArtificialStackFrames 不在 kotlinx/ 目录下!
           BLACKLIST_PREFIXES=(
+            "_COROUTINE"
             "kotlin"
             "kotlinx"
             "androidx"
@@ -598,7 +608,7 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "  Full Fat AAR 构建完成! (v7 广泛前缀黑名单)"
+          echo "  Full Fat AAR 构建完成! (v7.2 补充 _COROUTINE 前缀)"
           echo "  文件:    livekit-c2c-fat.aar"
           echo "  总大小:  $FAT_SIZE"
           echo "  其中:"
