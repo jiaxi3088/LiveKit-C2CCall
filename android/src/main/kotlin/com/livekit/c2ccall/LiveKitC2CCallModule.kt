@@ -592,8 +592,18 @@ class LiveKitC2CCallModule : UniModule() {
         scope.launch(Dispatchers.Main) {
             try {
                 // === 第1步: 权限预检查 ===
-                val hasCameraPerm = checkSelfPermission(appContext, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                val hasAudioPerm = checkSelfPermission(appContext, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                val hasCameraPerm = try {
+                    androidx.core.content.ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                } catch (e: Exception) {
+                    Log.w(TAG, "[DEBUG] ⚠️ 权限检查异常(CAMERA)，假设有权限: ${e.message}")
+                    true // 安全降级：假设有权限，让 SDK 自己处理权限错误
+                }
+                val hasAudioPerm = try {
+                    androidx.core.content.ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                } catch (e: Exception) {
+                    Log.w(TAG, "[DEBUG] ⚠️ 权限检查异常(AUDIO)，假设有权限: ${e.message}")
+                    true
+                }
                 Log.d(TAG, "[DEBUG] 步骤7b-0: 权限检查 CAMERA=$hasCameraPerm, RECORD_AUDIO=$hasAudioPerm")
 
                 // === 第2步: 可选开启麦克风 ===
