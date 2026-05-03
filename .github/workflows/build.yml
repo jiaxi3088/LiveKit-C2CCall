@@ -434,7 +434,7 @@ jobs:
           # 验证白名单包仍然存在
           echo ""
           echo "[Step 3d] Verifying whitelist packages preserved:"
-          for wp in "io/livekit" "livekit/org/webrtc" "org/webrtc" "com/livekit"; do
+          for wp in "io/livekit" "livekit/org/webrtc" "com/livekit"; do
             if [ -d "$MERGED_CLASSES/$wp" ]; then
               wp_cnt=$(find "$MERGED_CLASSES/$wp" -name "*.class" 2>/dev/null | wc -l)
               echo "  ✔ $wp/ ($wp_cnt classes)"
@@ -442,20 +442,30 @@ jobs:
               echo "  ✗ MISSING: $wp/ ⚠️"
             fi
           done
+          # org/webrtc/ 是可选的 (标准 WebRTC，非必需)
+          if [ -d "$MERGED_CLASSES/org/webrtc" ]; then
+            wc_cnt=$(find "$MERGED_CLASSES/org/webrtc" -name "*.class" 2>/dev/null | wc -l)
+            echo "  ✔ org/webrtc/ (optional, $wc_cnt classes)"
+          else
+            echo "  ℹ org/webrtc/ not present (using livekit.org.webrtc.* instead)"
+          fi
 
           # 打包最终 classes.jar
           CLASSES_OUT="$WORK/classes-fat.jar"
           
-          # 3c: 补充 Step 2b 找到的独立 WebRTC Java 类 (livekit.org.webrtc.*)
+          # 补充 Step 2b 找到的独立 WebRTC Java 类 (livekit.org.webrtc.*)
           if [ -d "$WEBRTC_DIR/java-classes" ] && [ "$(ls -A $WEBRTC_DIR/java-classes 2>/dev/null)" ]; then
             cp -r "$WEBRTC_DIR/java-classes/"* "$MERGED_CLASSES/" 2>/dev/null || true
             WC_JAVA_CNT=$(find "$WEBRTC_DIR/java-classes" -name "*.class" 2>/dev/null | wc -l)
             echo "  ✓ WebRTC Java classes (livekit.org.webrtc.*): $WC_JAVA_CNT classes"
           fi
           
+          # 用 zip 替代 jar cf 创建 JAR (避免 JDK 模块校验错误:
+          # "Package xxx missing from ModulePackages class file attribute")
+          # JAR 本质就是 ZIP 格式
           (cd "$MERGED_CLASSES" && \
-            rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro 2>/dev/null; \
-            jar cf "$CLASSES_OUT" . )
+            rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro META-INF/module-info.class META-INF/versions 2>/dev/null; \
+            zip -q -r "$CLASSES_OUT" . )
           CLASS_CNT=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
           echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1) ($CLASS_CNT classes)"
 
