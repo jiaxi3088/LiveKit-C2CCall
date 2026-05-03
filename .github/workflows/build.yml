@@ -95,14 +95,18 @@ jobs:
         run: |
           set -e
 
-          # ====== Full Fat AAR: 全部依赖自包含 v3 ======
+          # ====== Full Fat AAR: 全部依赖自包含 v4 ======
           # 不再依赖 HBuilderX 解析 Maven 依赖
           # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + 所有 .so
-          # 预期大小: ~30-50MB
-          # v3 修复:
-          #   1) Step 6 验证改为检查 classes.jar 内部内容（之前错误地在 AAR 顶层搜索）
+          # 预期大小: ~25-30MB (v4: 排除 HBuilderX 基座已包含的依赖)
+          # v4 变更:
+          #   排除 HBuilderX/UniApp 基座已内置的通用依赖 (~5.5MB):
+          #     - Kotlin stdlib (kotlin-stdlib, kotlin-stdlib-jdk*, kotlin-stdlib-common)
+          #     - JetBrains annotations
+          #     - AndroidX 基础库 (annotation, core, activity, fragment, lifecycle 系列)
+          # v3 修复保留:
+          #   1) Step 6 验证改为检查 classes.jar 内部内容
           #   2) 新增策略5: 全量扫描 Gradle cache 定位 livekit.org.webrtc Java 类
-          #      (android-prefixed 仅含 .so，Java 类来自 livekit-android-webrtc 或内嵌于 livekit-android)
 
           ANDROID_ROOT="$(pwd)"
           WORK="$ANDROID_ROOT/fat-aar-work"
@@ -312,22 +316,44 @@ jobs:
             echo "  ✓ Plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 3b: 全量合并 releaseRuntimeClasspath 所有依赖
+          # 3b: 合并 releaseRuntimeClasspath 依赖 (排除 HBuilderX 基座已包含的)
+          # v4: 精简打包，排除以下 HBuilderX/UniApp 基座内置依赖:
+          #   - Kotlin stdlib 系列 (基座自带 Kotlin 运行时)
+          #   - AndroidX 基础库 (annotation/core/activity/fragment/lifecycle)
+          #   - JetBrains annotations
+          # 这些库在基座中已存在，重复打入仅浪费空间
+          echo "[Step 3b] Merging runtime dependencies (v4: excluding HBuilderX base deps)..."
+
+          # 定义排除模式 (HBuilderX 基座已包含的包)
+          SKIP_PATTERNS="kotlin-stdlib kotlin-stdlib-jdk kotlin-stdlib-common org.jetbrains:annotation org.jetbrains.kotlin:kotlin-stdlib androidx.annotation: androidx.core:core androidx.activity:activity androidx.fragment:fragment androidx.lifecycle:lifecycle-"
+          
           ./gradlew :exportDeps --quiet 2>/dev/null || true
 
           if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
             DEP_CNT=0
             SKIP_CNT=0
+            EXCLUDE_LIST=""
             
             while IFS= read -r DEP_PATH; do
               [ -f "$DEP_PATH" ] || continue
               DEP_NAME=$(basename "$DEP_PATH")
               
-              # 仅排除两项:
-              #   1) 插件自身 (已在3a处理)
+              # 排除项1: 插件自身 (已在3a处理)
               echo "$DEP_NAME" | grep -qi "^livekit-c2ccall" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
-              #   2) uniapp stub (仅编译时使用，运行时由基座提供)
+              
+              # 排除项2: uniapp stub (仅编译时使用，运行时由基座提供)
               echo "$DEP_PATH" | grep -qi "uniapp" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
+              
+              # 排除项3: v4 新增 - HBuilderX 基座已包含的通用依赖
+              IS_EXCLUDED=0
+              for skip_pat in $SKIP_PATTERNS; do
+                if echo "$DEP_NAME" | grep -qi "^${skip_pat}" || echo "$DEP_PATH" | grep -qi "${skip_pat}"; then
+                  IS_EXCLUDED=1
+                  EXCLUDE_LIST="$EXCLUDE_LIST  ✗ $DEP_NAME (base)\n"
+                  break
+                fi
+              done
+              [ "$IS_EXCLUDED" -eq "1" ] && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
               
               # 解压 classes.jar（AAR）或直接解压 JAR
               TMP_EXTRACT="$WORK/dep-tmp-$RANDOM"
@@ -348,7 +374,11 @@ jobs:
               rm -rf "$TMP_EXTRACT"
             done < "$ANDROID_ROOT/build/exports/deps-runtime.txt"
             
-            echo "  --- Packed $DEP_CNT dependencies (skipped $SKIP_CNT: plugin/self + uniapp stub) ---"
+            echo "  --- Packed $DEP_CNT dependencies (skipped $SKIP_CNT: plugin + uniapp stub + HBuilderX base) ---"
+            if [ -n "$EXCLUDE_LIST" ]; then
+              echo "  Excluded (HBuilderX base already has):"
+              echo -e "$EXCLUDE_LIST"
+            fi
           else
             echo "  ⚠ No deps-runtime.txt, falling back to manual merge..."
             if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
@@ -506,7 +536,7 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "  Full Fat AAR 构建完成!"
+          echo "  Full Fat AAR 构建完成! (v4 精简版)"
           echo "  文件:    livekit-c2c-fat.aar"
           echo "  总大小:  $FAT_SIZE"
           echo "  其中:"
