@@ -664,7 +664,7 @@ class LiveKitC2CCallModule : UniModule() {
                     try {
                         // 前置安全检查
                         val lp2 = r.localParticipant
-                        Log.d(TAG, "[DEBUG] 步骤7b-3a: room.active=${r.isActive}, localParticipant.isCameraEnabled=${lp2?.isCameraEnabled}")
+                        Log.d(TAG, "[DEBUG] 步骤7b-3a: localParticipant.isCameraEnabled=${lp2?.isCameraEnabled}")
                         
                         // 使用 withTimeoutOrNull 保护（最多等 10 秒）
                         val camResult = kotlinx.coroutines.withTimeoutOrNull(10000L) {
