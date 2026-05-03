@@ -248,14 +248,10 @@ class LiveKitC2CCallModule : UniModule() {
     @UniJSMethod(uiThread = true)
     fun enableVideo(enable: Boolean) {
         isVideoEnabled = enable
+        Log.d(TAG, "[enableVideo] 被调用: enable=$enable")
 
-        scope.launch {
-            try {
-                val local = room?.localParticipant ?: return@launch
-                local.setCameraEnabled(enable)
-            } catch (e: Exception) {
-                sendEvent("onError", "切换摄像头失败: ${e.message}")
-            }
+        scope.launch(Dispatchers.Main) {
+            safeEnableCamera(enable)
         }
 
         announceForAccessibility(if (enable) "摄像头已开启" else "摄像头已关闭")
@@ -266,14 +262,10 @@ class LiveKitC2CCallModule : UniModule() {
     @UniJSMethod(uiThread = true)
     fun enableAudio(enable: Boolean) {
         isAudioEnabled = enable
+        Log.d(TAG, "[enableAudio] 被调用: enable=$enable")
 
-        scope.launch {
-            try {
-                val local = room?.localParticipant ?: return@launch
-                local.setMicrophoneEnabled(enable)
-            } catch (e: Exception) {
-                sendEvent("onError", "切换麦克风失败: ${e.message}")
-            }
+        scope.launch(Dispatchers.Main) {
+            safeEnableMicrophone(enable)
         }
 
         announceForAccessibility(if (enable) "麦克风已开启" else "麦克风已关闭")
@@ -283,16 +275,14 @@ class LiveKitC2CCallModule : UniModule() {
 
     @UniJSMethod(uiThread = true)
     fun switchCamera(position: String?) {
+        Log.d(TAG, "[switchCamera] 被调用: position=$position")
         // LiveKit SDK 2.x 摄像头切换通过 TrackPublishOptions 或重新发布轨道实现
-        // 此处暂记录用户选择，后续可通过 setCameraEnabled + 重启轨道实现切换
-        scope.launch {
-            try {
-                val local = room?.localParticipant ?: return@launch
-                local.setCameraEnabled(!isVideoEnabled)
-                isVideoEnabled = !isVideoEnabled
-            } catch (e: Exception) {
-                sendEvent("onError", "切换摄像头失败: ${e.message}")
-            }
+        // 使用安全方法替代直接调用
+        val newEnableState = !isVideoEnabled
+        isVideoEnabled = newEnableState
+        
+        scope.launch(Dispatchers.Main) {
+            safeEnableCamera(newEnableState)
         }
 
         val msg = if ("back" == position) "已切换到后置摄像头" else "已切换到前置摄像头"
@@ -596,137 +586,19 @@ class LiveKitC2CCallModule : UniModule() {
         observeLocalParticipant(r.localParticipant)
 
         // 7b. 发布本地摄像头 + 麦克风轨道
-        // ⚠️ v1.0.1 安全策略:
-        //    1. 运行时权限检查（防止未授权时访问硬件）
-        //    2. 条件执行（根据用户参数决定）
-        //    3. 超时保护 + 独立 try-catch（防止单步影响整体）
-        //    4. 安全降级（某步失败不影响后续步骤）
-        val appContext = getApplicationCompatible()
-        Log.d(TAG, "[DEBUG] 步骤7b: 启动媒体发布协程 (isAudioEnabled=$isAudioEnabled)...")
-        scope.launch(Dispatchers.Main) {
-            try {
-                // === 第1步: 权限预检查 ===
-                val hasCameraPerm = try {
-                    ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                } catch (e: Exception) {
-                    Log.w(TAG, "[DEBUG] ⚠️ 权限检查异常(CAMERA)，假设有权限: ${e.message}")
-                    true // 安全降级：假设有权限，让 SDK 自己处理权限错误
-                }
-                val hasAudioPerm = try {
-                    ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                } catch (e: Exception) {
-                    Log.w(TAG, "[DEBUG] ⚠️ 权限检查异常(AUDIO)，假设有权限: ${e.message}")
-                    true
-                }
-                Log.d(TAG, "[DEBUG] 步骤7b-0: 权限检查 CAMERA=$hasCameraPerm, RECORD_AUDIO=$hasAudioPerm")
-
-                // === 第2步: 可选开启麦克风 ===
-                if (isAudioEnabled && hasAudioPerm) {
-                    Log.d(TAG, "[DEBUG] 步骤7b-1: 开启麦克风... [thread=${Thread.currentThread().name}]")
-                    try {
-                        // 前置安全检查
-                        val lp = r.localParticipant
-                        Log.d(TAG, "[DEBUG] 步骤7b-1a: localParticipant=${lp?.identity}, isMicrophoneEnabled=${lp?.isMicrophoneEnabled}")
-                        
-                        val micResult = kotlinx.coroutines.withTimeoutOrNull(5000L) {
-                            Log.d(TAG, "[DEBUG] 步骤7b-1b: >>> 即将调用 setMicrophoneEnabled(true) <<<")
-                            lp?.setMicrophoneEnabled(true)
-                            Log.d(TAG, "[DEBUG] 步骤7b-1c: <<< setMicrophoneEnabled 已返回 >>>")
-                            true
-                        }
-                        if (micResult == true) {
-                            Log.d(TAG, "[DEBUG] ✅ 步骤7b-1完成: 麦克风已开启 (isMic=${lp?.isMicrophoneEnabled})")
-                        } else {
-                            Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-1超时 (5s)")
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "[DEBUG] ❌ 步骤7b-1失败: ${e.javaClass.simpleName}: ${e.message}")
-                    } catch (e: Throwable) {
-                        Log.e(TAG, "[DEBUG] 💥 步骤7b-1致命错误(Native?): ${e.javaClass.simpleName}: ${e.message}")
-                    }
-                } else if (!hasAudioPerm) {
-                    Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-1跳过: 无录音权限")
-                } else {
-                    Log.d(TAG, "[DEBUG] 步骤7b-1跳过: 用户关闭音频 (audioOpts=false), isAudioEnabled=$isAudioEnabled")
-                }
-
-                // === 第3步: 等待 Room 完全稳定 ===
-                Log.d(TAG, "[DEBUG] 步骤7b-2: 等待 2000ms 让 Room 连接完全稳定...")
-                kotlinx.coroutines.delay(2000)
-                Log.d(TAG, "[DEBUG] 步骤7b-2: 等待完毕")
-
-                // === 第4步: 可选开启摄像头（最危险的操作）===
-                var cameraSuccess = false
-                if (hasCameraPerm) {
-                    Log.d(TAG, "[DEBUG] 步骤7b-3: 即将调用 setCameraEnabled(true)...")
-                    Log.d(TAG, "[DEBUG] 当前线程=${Thread.currentThread().name}, Looper=${if(android.os.Looper.myLooper() != null) "✅" else "❌ null"}")
-                    
-                    try {
-                        // 前置安全检查
-                        val lp2 = r.localParticipant
-                        Log.d(TAG, "[DEBUG] 步骤7b-3a: localParticipant.isCameraEnabled=${lp2?.isCameraEnabled}")
-                        
-                        // 使用 withTimeoutOrNull 保护（最多等 10 秒）
-                        val camResult = kotlinx.coroutines.withTimeoutOrNull(10000L) {
-                            Log.d(TAG, "[DEBUG] 步骤7b-3b: >>> 即将调用 setCameraEnabled(true) <<<")
-                            lp2?.setCameraEnabled(true)
-                            Log.d(TAG, "[DEBUG] 步骤7b-3c: <<< setCameraEnabled 已返回 >>>")
-                            true
-                        }
-                        if (camResult == true) {
-                            Log.d(TAG, "[DEBUG] ✅✅✅ 步骤7b-3成功: setCameraEnabled(true) 正常返回! (isCam=${lp2?.isCameraEnabled})")
-                            cameraSuccess = true
-                        } else {
-                            Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-3超时 (>10秒)，可能 Native 卡死")
-                            sendEvent("onWarning", "摄像头初始化耗时过长")
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "[DEBUG] ❌ 步骤7b-3异常: ${e.javaClass.simpleName}: ${e.message}", e)
-                        sendEvent("onError", "摄像头异常: ${e.message}")
-                    } catch (e: Throwable) {
-                        // ⚠️ Native Crash (SIGSEGV/SIGABRT) 无法被 Java catch 捕获
-                        Log.e(TAG, "[DEBUG] 💥💥💥 步骤7b-3致命错误(Native Crash?): ${e.javaClass.simpleName}: ${e.message}")
-                        sendEvent("onFatalError", "Native层错误: ${e.javaClass.simpleName}")
-                    }
-                } else {
-                    Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-3跳过: 无相机权限!")
-                    sendEvent("onWarning", "无相机权限，视频不可用")
-                }
-
-                // === 第5步: 等待轨道发布 ===
-                if (cameraSuccess) {
-                    Log.d(TAG, "[DEBUG] 步骤7b-4: 等待 1000ms 让视频轨道发布...")
-                    kotlinx.coroutines.delay(1000)
-                }
-
-                // === 最终状态检查与绑定 ===
-                Log.d(TAG, "[DEBUG] ===== 最终媒体状态报告 =====")
-                
-                val localVideoPub = findTrackPublication(r.localParticipant, Track.Kind.VIDEO)
-                val localAudioPub = findTrackPublication(r.localParticipant, Track.Kind.AUDIO)
-                val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
-                val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
-                
-                Log.d(TAG, "[DEBUG] 本地VIDEO: ${if(localVideoPub != null) "✅ sid=${localVideoPub.sid}" else "❌ 未发布"}")
-                Log.d(TAG, "[DEBUG] 本地AUDIO: ${if(localAudioPub != null) "✅ sid=${localAudioPub.sid}" else "❌ 未发布"}")
-                Log.d(TAG, "[DEBUG] local渲染器: ${if(localRenderer != null) "✅ 就绪" else "❌ 未就绪/未初始化"}")
-                Log.d(TAG, "[DEBUG] remote渲染器: ${if(remoteRenderer != null) "✅ 就绪" else "❌ 未就绪/未初始化"}")
-
-                // 尝试手动绑定本地视频（兜底机制）
-                if (localVideoPub != null && localRenderer != null) {
-                    bindTrackToRenderer(localVideoPub, localRenderer)
-                    Log.d(TAG, "[DEBUG] ✅ 手动绑定本地视频 → renderer 成功")
-                    sendEvent("onLocalVideoReady", "Local video ready")
-                } else if (localVideoPub != null && localRenderer == null) {
-                    Log.w(TAG, "[DEBUG] ⚠️ VIDEO已发布但local renderer未就绪(延迟初始化中?)")
-                }
-
-                Log.d(TAG, "[DEBUG] ===== 媒体初始化流程结束 (正常退出) =====")
-            } catch (e: Exception) {
-                Log.e(TAG, "[DEBUG] ❌ 媒体发布流程顶层异常: ${e.javaClass.simpleName}: ${e.message}", e)
-            }
-        }
-        Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（Main线程异步执行）")
+        // ⚠️ v1.0.2 安全策略（重大变更）:
+        //    不再自动启用麦克风/摄像头！原因：setMicrophoneEnabled/setCameraEnabled 在部分设备上触发 Native SIGSEGV
+        //    改为：
+        //      1. startC2CVideoCall 只负责连接 Room + 初始化渲染器
+        //      2. 媒体设备通过独立的 enableMic / enableCamera 方法按需启用
+        //      3. 这样即使某个设备崩溃也不会影响连接本身
+        Log.d(TAG, "[DEBUG] 步骤7b: ⚠️ 跳过自动媒体启用（v1.0.2 安全策略）")
+        Log.d(TAG, "[DEBUG] 步骤7b: isAudioEnabled=$isAudioEnabled, 请使用 enableMic()/enableCamera() 单独启用")
+        sendEvent("onMediaReady", mapOf(
+            "message" to "Room已连接，请通过JS调用 enableMic/enableCamera 启用媒体",
+            "audioEnabled" to false,
+            "cameraEnabled" to false
+        ))
 
         // 7d. 订阅已存在的远端参与者媒体轨道
         Log.d(TAG, "[DEBUG] 步骤7d: 订阅远端参与者...")
@@ -1060,6 +932,128 @@ class LiveKitC2CCallModule : UniModule() {
                     else -> {}
                 }
             }
+        }
+    }
+
+    // ======================== 安全媒体启用方法 ========================
+    // ⚠️ v1.0.2: setMicrophoneEnabled/setCameraEnabled 在部分设备触发 Native SIGSEGV
+    // 这些方法提供超时保护 + 细粒度日志 + 安全降级
+
+    /**
+     * 安全启用/禁用麦克风（带 Native Crash 保护）
+     */
+    private suspend fun safeEnableMicrophone(enable: Boolean) {
+        val local = room?.localParticipant
+        Log.d(TAG, "[MIC] safeEnableMicrophone: enable=$enable, lp=${local?.identity}, currentMic=${local?.isMicrophoneEnabled}")
+        
+        if (local == null) {
+            Log.w(TAG, "[MIC] ❌ localParticipant 为 null，跳过")
+            sendEvent("onError", "麦克风操作失败: 未连接到房间")
+            return
+        }
+        if (local.isMicrophoneEnabled == enable) {
+            Log.d(TAG, "[MIC] ⏭️ 麦克风状态已是 $enable，跳过")
+            return
+        }
+
+        try {
+            // 使用独立线程执行 + 超时保护
+            val result = withTimeoutOrNull(8000L) {
+                Log.d(TAG, "[MIC] >>> 调用 setMicrophoneEnabled($enable) <<< [thread=${Thread.currentThread().name}]")
+                local.setMicrophoneEnabled(enable)
+                Log.d(TAG, "[MIC] <<< setMicrophoneEnabled($enable) 已返回 >>>")
+                true
+            }
+            
+            when {
+                result == true -> {
+                    Log.d(TAG, "[MIC] ✅ 麦克风 ${if(enable)"开启" else "关闭"} 成功 (actual=${local.isMicrophoneEnabled})")
+                    sendEvent("onAudioStateChanged", mapOf(
+                        "enabled" to local.isMicrophoneEnabled,
+                        "source" to "safeEnableMicrophone"
+                    ))
+                }
+                else -> {
+                    Log.e(TAG, "[MIC] ⚠️ 操作超时 (8s)，可能 Native 层卡死或崩溃")
+                    sendEvent("onError", "麦克风操作超时(8s)，设备可能不支持")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[MIC] ❌ Java 异常: ${e.javaClass.simpleName}: ${e.message}", e)
+            sendEvent("onError", "麦克风异常: ${e.message}")
+        } catch (e: Throwable) {
+            Log.e(TAG, "[MIC] 💥 致命错误(Native?): ${e.javaClass.simpleName}: ${e.message}")
+            sendEvent("onFatalError", "Native层错误(MIC): ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * 安全启用/禁用摄像头（带 Native Crash 保护）
+     */
+    private suspend fun safeEnableCamera(enable: Boolean) {
+        val local = room?.localParticipant
+        Log.d(TAG, "[CAM] safeEnableCamera: enable=$enable, lp=${local?.identity}, currentCam=${local?.isCameraEnabled}")
+
+        if (local == null) {
+            Log.w(TAG, "[CAM] ❌ localParticipant 为 null，跳过")
+            sendEvent("onError", "摄像头操作失败: 未连接到房间")
+            return
+        }
+        if (local.isCameraEnabled == enable) {
+            Log.d(TAG, "[CAM] ⏭️ 摄像头状态已是 $enable，跳过")
+            return
+        }
+
+        try {
+            val result = withTimeoutOrNull(12000L) {
+                Log.d(TAG, "[CAM] >>> 调用 setCameraEnabled($enable) <<< [thread=${Thread.currentThread().name}, Looper=${if(android.os.Looper.myLooper() != null) "OK" else "NULL"}]")
+                local.setCameraEnabled(enable)
+                Log.d(TAG, "[CAM] <<< setCameraEnabled($enable) 已返回 >>>")
+                true
+            }
+            
+            when {
+                result == true -> {
+                    Log.d(TAG, "[CAM] ✅ 摄像头 ${if(enable)"开启" else "关闭"} 成功 (actual=${local.isCameraEnabled})")
+                    sendEvent("onVideoStateChanged", mapOf(
+                        "enabled" to local.isCameraEnabled,
+                        "source" to "safeEnableCamera"
+                    ))
+                    // 如果开启了摄像头，尝试绑定到本地渲染器
+                    if (enable) bindLocalVideoIfNeeded()
+                }
+                else -> {
+                    Log.e(TAG, "[CAM] ⚠️ 操作超时 (12s)，可能 Native 层卡死或崩溃")
+                    sendEvent("onError", "摄像头操作超时(12s)，设备可能不支持")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[CAM] ❌ Java 异常: ${e.javaClass.simpleName}: ${e.message}", e)
+            sendEvent("onError", "摄像头异常: ${e.message}")
+        } catch (e: Throwable) {
+            Log.e(TAG, "[CAM] 💥 致命错误(Native?): ${e.javaClass.simpleName}: ${e.message}")
+            sendEvent("onFatalError", "Native层错误(CAM): ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * 尝试将本地视频轨道绑定到渲染器
+     */
+    private fun bindLocalVideoIfNeeded() {
+        try {
+            val r = room ?: return
+            val localVideoPub = findTrackPublication(r.localParticipant, Track.Kind.VIDEO)
+            val renderer = LiveKitVideoView.localViewInstance?.getRenderer()
+            
+            if (localVideoPub != null && renderer != null) {
+                bindTrackToRenderer(localVideoPub, renderer)
+                Log.d(TAG, "[BIND] ✅ 本地视频已绑定到 renderer")
+                sendEvent("onLocalVideoReady", "Local video bound to renderer")
+            } else {
+                Log.d(TAG, "[BIND] videoPub=${if(localVideoPub != null) "OK" else "null"}, renderer=${if(renderer != null) "OK" else "null"}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "[BIND] 绑定失败: ${e.message}")
         }
     }
 
