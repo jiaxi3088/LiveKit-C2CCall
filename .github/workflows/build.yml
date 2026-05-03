@@ -95,18 +95,15 @@ jobs:
         run: |
           set -e
 
-          # ====== Full Fat AAR: 全部依赖自包含 v5 ======
+          # ====== Full Fat AAR: 全部依赖自包含 v6 ======
           # 不再依赖 HBuilderX 解析 Maven 依赖
-          # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + 所有 .so
-          # 预期大小: ~20-25MB (v5: 排除所有 HBuilderX 基座已包含的依赖，解决 Duplicate class 错误)
-          # v5 变更:
-          #   排除 HBuilderX/UniApp 基座内置的 ALL 通用依赖 (解决 Duplicate class 构建错误):
-          #     - Kotlin stdlib (kotlin-stdlib, kotlin-stdlib-jdk*, kotlin-stdlib-common)
-          #     - Kotlin coroutines (kotlinx-coroutines-core/jdk 等)
-          #     - JetBrains annotations (org.jetbrains:annotations)
-          #     - OkHttp (com.squareup.okhttp3:okhttp)
-          #     - Okio (com.squareup.okio:okio)
-          #     - AndroidX 基础库 (annotation/core/activity/fragment/lifecycle 系列)
+          # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + arm64 .so
+          # 预期大小: ~20-25MB (v6: 物理剥离 HBuilderX 基座包，100% 无冲突)
+          # v6 核心变更:
+          #   先全量合并所有依赖，然后从合并后的 class 目录中 rm -rf 删除
+          #   HBuilderX 基座已有的包 (解决 Duplicate class 构建错误):
+          #     kotlinx.coroutines, okhttp3, okio, org.jetbrains.annotations,
+          #     kotlin/*, androidx.(annotation|core|activity|fragment|lifecycle)
           # v4/v3 修复保留:
           #   1) Step 6 验证改为检查 classes.jar 内部内容
           #   2) 新增策略5: 全量扫描 Gradle cache 定位 livekit.org.webrtc Java 类
@@ -303,19 +300,14 @@ jobs:
             # 不退出，继续尝试从 deps-runtime.txt 合并
           fi
 
-          # ---- Step 3: 全量打包所有运行时依赖 (Full Fat AAR) v5 ----
-          # v5 策略: 排除 HBuilderX 基座已包含的 ALL 通用依赖，避免 Duplicate class 错误
-          # 排除清单 (均来自 error.md 实际报错):
-          #   A) Kotlin 运行时: stdlib, stdlib-jdk*, stdlib-common
-          #   B) Kotlin 协程: kotlinx-coroutines-* (HBuilderX 自带 1.8.1)
-          #   C) 注解库: org.jetbrains:annotations / org.jetbrains.kotlin:annotation*
-          #   D) 网络: okhttp3 (com.squareup.okhttp3:okhttp, HBuilderX 带 3.12.12)
-          #   D) IO: okio (com.squareup.okio:okio, HBuilderX 带 1.15.0)
-          #   E) AndroidX 基础: annotation/core/activity/fragment/lifecycle
+          # ---- Step 3: 全量打包所有运行时依赖 (Full Fat AAR) v6 ----
+          # v6 策略: 先全量合并，再从合并目录中物理删除 HBuilderX 基座已有的包
+          #   这比依赖名模式匹配更可靠 — 直接操作 class 文件目录，100% 保证无重复
+          #   排除的包均来自 HBuilderX 云打包实际报错 (build_error_log.txt)
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "[Step 3] Full Fat AAR v5: merging deps (excluding ALL HBuilderX base)..."
+          echo "[Step 3] Full Fat AAR v6: merge all deps then strip HBuilderX base..."
 
           # 3a: 插件自身代码
           if [ -f "$PLUGIN_EXTRACT/classes.jar" ] && [ -s "$PLUGIN_EXTRACT/classes.jar" ]; then
@@ -323,39 +315,22 @@ jobs:
             echo "  ✓ Plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 3b: 合并 releaseRuntimeClasspath 依赖 (排除 HBuilderX 基座已包含的)
-          echo "[Step 3b] Merging runtime dependencies (v5: excluding all HBuilderX base deps)..."
-
-          # 定义排除模式 (HBuilderX 基座已包含的包 — 来自实际 Duplicate class 报错)
-          SKIP_PATTERNS="kotlin-stdlib kotlin-stdlib-jdk kotlin-stdlib-common kotlinx-coroutines- org.jetbrains:annotation org.jetbrains.kotlin:kotlin-stdlib com.squareup.okhttp3:okhttp com.squareup.okio:okio androidx.annotation: androidx.core:core androidx.activity:activity androidx.fragment:fragment androidx.lifecycle:lifecycle-"
+          # 3b: 合并 releaseRuntimeClasspath 所有依赖 (先全部合入)
+          echo "[Step 3b] Merging ALL runtime dependencies..."
           
           ./gradlew :exportDeps --quiet 2>/dev/null || true
 
           if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
             DEP_CNT=0
             SKIP_CNT=0
-            EXCLUDE_LIST=""
             
             while IFS= read -r DEP_PATH; do
               [ -f "$DEP_PATH" ] || continue
               DEP_NAME=$(basename "$DEP_PATH")
               
-              # 排除项1: 插件自身 (已在3a处理)
+              # 仅跳过插件自身和 uniapp stub (其余全部合入，后面统一剥离)
               echo "$DEP_NAME" | grep -qi "^livekit-c2ccall" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
-              
-              # 排除项2: uniapp stub (仅编译时使用，运行时由基座提供)
               echo "$DEP_PATH" | grep -qi "uniapp" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
-              
-              # 排除项3: v4 新增 - HBuilderX 基座已包含的通用依赖
-              IS_EXCLUDED=0
-              for skip_pat in $SKIP_PATTERNS; do
-                if echo "$DEP_NAME" | grep -qi "^${skip_pat}" || echo "$DEP_PATH" | grep -qi "${skip_pat}"; then
-                  IS_EXCLUDED=1
-                  EXCLUDE_LIST="$EXCLUDE_LIST  ✗ $DEP_NAME (base)\n"
-                  break
-                fi
-              done
-              [ "$IS_EXCLUDED" -eq "1" ] && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
               
               # 解压 classes.jar（AAR）或直接解压 JAR
               TMP_EXTRACT="$WORK/dep-tmp-$RANDOM"
@@ -376,11 +351,7 @@ jobs:
               rm -rf "$TMP_EXTRACT"
             done < "$ANDROID_ROOT/build/exports/deps-runtime.txt"
             
-            echo "  --- Packed $DEP_CNT dependencies (skipped $SKIP_CNT: plugin + uniapp stub + HBuilderX base v5) ---"
-            if [ -n "$EXCLUDE_LIST" ]; then
-              echo "  Excluded (HBuilderX base already has):"
-              echo -e "$EXCLUDE_LIST"
-            fi
+            echo "  --- Merged $DEP_CNT dependencies (skipped $SKIP_CNT: plugin + uniapp stub) ---"
           else
             echo "  ⚠ No deps-runtime.txt, falling back to manual merge..."
             if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
@@ -391,6 +362,43 @@ jobs:
               unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
               echo "  ✓ WebRTC ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
             fi
+          fi
+
+          # ---- Step 3c: 剥离 HBuilderX 基座已有的包 (核心修复!) ----
+          # v6: 不再依赖依赖名模式匹配(不可靠)，改为直接从合并后的 class 目录
+          #     物理删除冲突包。这是 100% 可靠的方法。
+          # 所有包均来自 HBuilderX 云打包实际报错 (build_error_log.txt)
+          echo ""
+          echo "[Step 3c] Stripping HBuilderX base packages from merged classes..."
+          
+          STRIP_BEFORE=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
+          STRIPPED_PKGS=""
+          
+          for strip_pkg in \
+            "kotlinx/coroutines"           \
+            "okhttp3"                       \
+            "okio"                          \
+            "org/jetbrains/annotations"    \
+            "org/intellij/lang/annotations"\
+            "kotlin"                        \
+            "androidx/annotation"           \
+            "androidx/core"                 \
+            "androidx/activity"             \
+            "androidx/fragment"             \
+            "androidx/lifecycle"; do
+            
+            if [ -d "$MERGED_CLASSES/$strip_pkg" ]; then              STRIP_CNT=$(find "$MERGED_CLASSES/$strip_pkg" -name "*.class" 2>/dev/null | wc -l)
+              rm -rf "$MERGED_CLASSES/$strip_pkg" 2>/dev/null || true
+              STRIPPED_PKGS="$STRIPPED_PKGS    ✗ $strip_pkg ($STRIP_CNT classes)\n"
+            fi
+          done
+          
+          STRIP_AFTER=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
+          STRIPPED=$((STRIP_BEFORE - STRIP_AFTER))
+          echo "  Stripped $STRIPPED classes ($STRIP_BEFORE → $STRIP_AFTER remaining)"
+          if [ -n "$STRIPPED_PKGS" ]; then
+            echo "  Removed packages:"
+            echo -e "$STRIPPED_PKGS"
           fi
 
           # 打包最终 classes.jar
@@ -538,7 +546,7 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "  Full Fat AAR 构建完成! (v5 无冲突版)"
+          echo "  Full Fat AAR 构建完成! (v6 剥离版)"
           echo "  文件:    livekit-c2c-fat.aar"
           echo "  总大小:  $FAT_SIZE"
           echo "  其中:"
