@@ -231,21 +231,44 @@ jobs:
           if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
             DEP_CNT=0
             SKIPPED_CNT=0
-            # HBuilderX 基座自带的库（不需要打入）
-            SKIP_PATTERNS="uniapp|androidx\.|kotlin-stdlib|kotlinx-coroutines.*core.*[0-9]|fastjson|org.jetbrains.annotations"
             
             while IFS= read -r DEP_PATH; do
               [ -f "$DEP_PATH" ] || continue
+              DEP_NAME=$(basename "$DEP_PATH")
               
               # 跳过插件自身
-              basename "$DEP_PATH" | grep -qi "^livekit-c2ccall" && { SKIPPED_CNT=$((SKIPPED_CNT+1)); continue; }
+              echo "$DEP_NAME" | grep -qi "^livekit-c2ccall" && { SKIPPED_CNT=$((SKIPPED_CNT+1)); continue; }
               
-              # 跳过 HBuilderX 基座自带
-              basename "$DEP_PATH" | grep -qiE "($SKIP_PATTERNS)" && { 
-                echo "    ⊘ $(basename $DEP_PATH) (HBuilderX base)"
+              # 跳过 HBuilderX 基座自带（通过完整路径匹配 groupId）
+              # Gradle cache 路径格式: .../groupId/artifactId/version/.../filename
+              # 例如: .../androidx.core/core/1.13.1/.../core-1.13.1.aar
+              # 文件名不含 androidx. 前缀，必须检查路径!
+              IS_BASE="no"
+              
+              # 1) 完整路径中含 androidx.* groupId → 基座自带
+              echo "$DEP_PATH" | grep -qi "/androidx[./]" && IS_BASE="yes"
+              
+              # 2) Kotlin 标准库 → 基座自带
+              echo "$DEP_PATH" | grep -qi "/kotlin-stdlib" && IS_BASE="yes"
+              echo "$DEP_PATH" | grep -qi "/kotlin-stdlib-jdk" && IS_BASE="yes"
+              
+              # 3) Kotlinx Coroutines 核心 → 基座自带（但保留 serialization/json 等非核心）
+              echo "$DEP_PATH" | grep -qi "/kotlinx.coroutines/kotlinx-coroutines-core" && IS_BASE="yes"
+              
+              # 4) FastJSON → 基座自带
+              echo "$DEP_PATH" | grep -qi "fastjson" && IS_BASE="yes"
+              
+              # 5) JetBrains annotations → 基座自带
+              echo "$DEP_PATH" | grep -qi "jetbrains.annotations" && IS_BASE="yes"
+              
+              # 6) uni-app SDK stub → 编译用，不打包
+              echo "$DEP_PATH" | grep -qi "uniapp" && IS_BASE="yes"
+              
+              if [ "$IS_BASE" = "yes" ]; then
+                echo "    ⊘ $DEP_NAME (HBuilderX base)"
                 SKIPPED_CNT=$((SKIPPED_CNT+1))
                 continue
-              }
+              fi
               
               # 解压 classes.jar（AAR）或直接解压 JAR
               TMP_EXTRACT="$WORK/dep-tmp-$RANDOM"
