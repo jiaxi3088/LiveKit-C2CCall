@@ -23,6 +23,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * LiveKit 1v1 视频通话 uni-app 原生插件
@@ -594,11 +595,7 @@ class LiveKitC2CCallModule : UniModule() {
         //      3. 这样即使某个设备崩溃也不会影响连接本身
         Log.d(TAG, "[DEBUG] 步骤7b: ⚠️ 跳过自动媒体启用（v1.0.2 安全策略）")
         Log.d(TAG, "[DEBUG] 步骤7b: isAudioEnabled=$isAudioEnabled, 请使用 enableMic()/enableCamera() 单独启用")
-        sendEvent("onMediaReady", mapOf(
-            "message" to "Room已连接，请通过JS调用 enableMic/enableCamera 启用媒体",
-            "audioEnabled" to false,
-            "cameraEnabled" to false
-        ))
+        sendEvent("onMediaReady", "Room已连接，请通过JS调用 enableMic/enableCamera 启用媒体")
 
         // 7d. 订阅已存在的远端参与者媒体轨道
         Log.d(TAG, "[DEBUG] 步骤7d: 订阅远端参与者...")
@@ -968,10 +965,7 @@ class LiveKitC2CCallModule : UniModule() {
             when {
                 result == true -> {
                     Log.d(TAG, "[MIC] ✅ 麦克风 ${if(enable)"开启" else "关闭"} 成功 (actual=${local.isMicrophoneEnabled})")
-                    sendEvent("onAudioStateChanged", mapOf(
-                        "enabled" to local.isMicrophoneEnabled,
-                        "source" to "safeEnableMicrophone"
-                    ))
+                    sendEvent("onAudioStateChanged", if(enable) "mic_on" else "mic_off")
                 }
                 else -> {
                     Log.e(TAG, "[MIC] ⚠️ 操作超时 (8s)，可能 Native 层卡死或崩溃")
@@ -1015,10 +1009,7 @@ class LiveKitC2CCallModule : UniModule() {
             when {
                 result == true -> {
                     Log.d(TAG, "[CAM] ✅ 摄像头 ${if(enable)"开启" else "关闭"} 成功 (actual=${local.isCameraEnabled})")
-                    sendEvent("onVideoStateChanged", mapOf(
-                        "enabled" to local.isCameraEnabled,
-                        "source" to "safeEnableCamera"
-                    ))
+                    sendEvent("onVideoStateChanged", if(enable) "cam_on" else "cam_off")
                     // 如果开启了摄像头，尝试绑定到本地渲染器
                     if (enable) bindLocalVideoIfNeeded()
                 }
