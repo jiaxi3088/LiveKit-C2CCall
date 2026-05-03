@@ -70,10 +70,16 @@ class LiveKitC2CCallModule : UniModule() {
 
         @Suppress("UNCHECKED_CAST")
         val videoOpts = options["videoOptions"] as? Map<String, Any>
-        @Suppress("UNCHECKED_CAST")
-        val audioOpts = options["audioOptions"] as? Map<String, Any>
+        // 支持 Map ({"enabled": false}) 和直接 Boolean (false) 两种格式
+        val rawAudioOpts = options["audioOptions"]
+        val audioOpts = when (rawAudioOpts) {
+            is Map<*, *> -> @Suppress("UNCHECKED_CAST") (rawAudioOpts as Map<String, Any>)
+            is Boolean -> mapOf("enabled" to rawAudioOpts)
+            null -> null
+            else -> null // 不支持的类型，走默认逻辑
+        }
         val callRing = options["callRing"] as? String
-        Log.d(TAG, "[DEBUG] videoOpts=$videoOpts, audioOpts=${audioOpts != null}, callRing=$callRing")
+        Log.d(TAG, "[DEBUG] videoOpts=$videoOpts, audioOpts=$audioOpts (rawType=${rawAudioOpts?.javaClass?.simpleName}), callRing=$callRing")
 
         parseAudioPublishOptions(audioOpts)
 
@@ -161,9 +167,16 @@ class LiveKitC2CCallModule : UniModule() {
 
         @Suppress("UNCHECKED_CAST")
         val videoOpts = options["videoOptions"] as? Map<String, Any>
-        @Suppress("UNCHECKED_CAST")
-        val audioOpts = options["audioOptions"] as? Map<String, Any>
+        // 支持 Map ({"enabled": false}) 和直接 Boolean (false) 两种格式
+        val rawAudioOpts = options["audioOptions"]
+        val audioOpts = when (rawAudioOpts) {
+            is Map<*, *> -> @Suppress("UNCHECKED_CAST") (rawAudioOpts as Map<String, Any>)
+            is Boolean -> mapOf("enabled" to rawAudioOpts)
+            null -> null
+            else -> null
+        }
         val answerRing = options["answerRing"] as? String
+        Log.d(TAG, "[DEBUG] answerC2C: videoOpts=$videoOpts, audioOpts=$audioOpts (rawType=${rawAudioOpts?.javaClass?.simpleName})")
 
         parseAudioPublishOptions(audioOpts)
 
@@ -609,29 +622,38 @@ class LiveKitC2CCallModule : UniModule() {
 
                 // === 第2步: 可选开启麦克风 ===
                 if (isAudioEnabled && hasAudioPerm) {
-                    Log.d(TAG, "[DEBUG] 步骤7b-1: 开启麦克风...")
+                    Log.d(TAG, "[DEBUG] 步骤7b-1: 开启麦克风... [thread=${Thread.currentThread().name}]")
                     try {
+                        // 前置安全检查
+                        val lp = r.localParticipant
+                        Log.d(TAG, "[DEBUG] 步骤7b-1a: localParticipant=${lp?.identity}, isMicrophoneEnabled=${lp?.isMicrophoneEnabled}")
+                        
                         val micResult = kotlinx.coroutines.withTimeoutOrNull(5000L) {
-                            r.localParticipant.setMicrophoneEnabled(true)
+                            Log.d(TAG, "[DEBUG] 步骤7b-1b: >>> 即将调用 setMicrophoneEnabled(true) <<<")
+                            lp?.setMicrophoneEnabled(true)
+                            Log.d(TAG, "[DEBUG] 步骤7b-1c: <<< setMicrophoneEnabled 已返回 >>>")
                             true
                         }
                         if (micResult == true) {
-                            Log.d(TAG, "[DEBUG] ✅ 步骤7b-1完成: 麦克风已开启")
+                            Log.d(TAG, "[DEBUG] ✅ 步骤7b-1完成: 麦克风已开启 (isMic=${lp?.isMicrophoneEnabled})")
                         } else {
-                            Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-1超时")
+                            Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-1超时 (5s)")
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "[DEBUG] ❌ 步骤7b-1失败: ${e.javaClass.simpleName}: ${e.message}")
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "[DEBUG] 💥 步骤7b-1致命错误(Native?): ${e.javaClass.simpleName}: ${e.message}")
                     }
                 } else if (!hasAudioPerm) {
                     Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-1跳过: 无录音权限")
                 } else {
-                    Log.d(TAG, "[DEBUG] 步骤7b-1跳过: 用户关闭音频 (audioOpts=false)")
+                    Log.d(TAG, "[DEBUG] 步骤7b-1跳过: 用户关闭音频 (audioOpts=false), isAudioEnabled=$isAudioEnabled")
                 }
 
                 // === 第3步: 等待 Room 完全稳定 ===
                 Log.d(TAG, "[DEBUG] 步骤7b-2: 等待 2000ms 让 Room 连接完全稳定...")
                 kotlinx.coroutines.delay(2000)
+                Log.d(TAG, "[DEBUG] 步骤7b-2: 等待完毕")
 
                 // === 第4步: 可选开启摄像头（最危险的操作）===
                 var cameraSuccess = false
@@ -640,13 +662,19 @@ class LiveKitC2CCallModule : UniModule() {
                     Log.d(TAG, "[DEBUG] 当前线程=${Thread.currentThread().name}, Looper=${if(android.os.Looper.myLooper() != null) "✅" else "❌ null"}")
                     
                     try {
+                        // 前置安全检查
+                        val lp2 = r.localParticipant
+                        Log.d(TAG, "[DEBUG] 步骤7b-3a: room.active=${r.isActive}, localParticipant.isCameraEnabled=${lp2?.isCameraEnabled}")
+                        
                         // 使用 withTimeoutOrNull 保护（最多等 10 秒）
                         val camResult = kotlinx.coroutines.withTimeoutOrNull(10000L) {
-                            r.localParticipant.setCameraEnabled(true)
+                            Log.d(TAG, "[DEBUG] 步骤7b-3b: >>> 即将调用 setCameraEnabled(true) <<<")
+                            lp2?.setCameraEnabled(true)
+                            Log.d(TAG, "[DEBUG] 步骤7b-3c: <<< setCameraEnabled 已返回 >>>")
                             true
                         }
                         if (camResult == true) {
-                            Log.d(TAG, "[DEBUG] ✅✅✅ 步骤7b-3成功: setCameraEnabled(true) 正常返回!")
+                            Log.d(TAG, "[DEBUG] ✅✅✅ 步骤7b-3成功: setCameraEnabled(true) 正常返回! (isCam=${lp2?.isCameraEnabled})")
                             cameraSuccess = true
                         } else {
                             Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-3超时 (>10秒)，可能 Native 卡死")
@@ -656,9 +684,8 @@ class LiveKitC2CCallModule : UniModule() {
                         Log.e(TAG, "[DEBUG] ❌ 步骤7b-3异常: ${e.javaClass.simpleName}: ${e.message}", e)
                         sendEvent("onError", "摄像头异常: ${e.message}")
                     } catch (e: Throwable) {
-                        // ⚠️ Native Crash (SIGSEGV/SIGABRT) 无法被捕获
-                        // 这里只能捕获到 Java 层的 Error (如 UnsatisfiedLinkError)
-                        Log.e(TAG, "[DEBUG] 💥💥💥 步骤7b-3致命错误: ${e.javaClass.simpleName}: ${e.message}", e)
+                        // ⚠️ Native Crash (SIGSEGV/SIGABRT) 无法被 Java catch 捕获
+                        Log.e(TAG, "[DEBUG] 💥💥💥 步骤7b-3致命错误(Native Crash?): ${e.javaClass.simpleName}: ${e.message}")
                         sendEvent("onFatalError", "Native层错误: ${e.javaClass.simpleName}")
                     }
                 } else {
