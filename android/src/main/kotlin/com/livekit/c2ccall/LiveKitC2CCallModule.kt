@@ -576,6 +576,10 @@ class LiveKitC2CCallModule : UniModule() {
         }
         Log.d(TAG, "[DEBUG] 步骤7a: EglBase check done")
 
+        // 7b-0. 启动本地参与者轨道事件监听（用于自动绑定 video track 到 renderer）
+        Log.d(TAG, "[DEBUG] 步骤7b-0: 启动本地轨道监听...")
+        observeLocalParticipant(r.localParticipant)
+
         // 7b. 发布本地摄像头 + 麦克风轨道
         // ⚠️ 重要: 摄像头/麦克风操作必须在 IO 线程执行！
         //    在 Main 线程调用 WebRTC Native 方法可能触发 SIGSEGV
@@ -595,9 +599,24 @@ class LiveKitC2CCallModule : UniModule() {
                 r.localParticipant.setCameraEnabled(true)
                 Log.d(TAG, "[DEBUG] 步骤7b-3: ✅ setCameraEnabled(true) 成功返回!")
                 
+                // 等待一小段时间让 track publication 完成
+                kotlinx.coroutines.delay(100)
+                Log.d(TAG, "[DEBUG] 步骤7b-4: 检查本地视频发布状态...")
+                
+                val localVideoPub = findTrackPublication(r.localParticipant, Track.Kind.VIDEO)
+                Log.d(TAG, "[DEBUG] 步骤7b-5: 本地视频 publication=${if (localVideoPub != null) "✅ ${localVideoPub.sid}" else "❌ null"}")
+                
                 Log.d(TAG, "[DEBUG] 步骤7c-1: 即将调用 local.setMicrophoneEnabled($isAudioEnabled)...")
                 r.localParticipant.setMicrophoneEnabled(isAudioEnabled)
                 Log.d(TAG, "[DEBUG] 步骤7c-2: ✅ setMicrophoneEnabled 成功返回! (enabled=$isAudioEnabled)")
+                
+                // 最终状态检查
+                kotlinx.coroutines.delay(200)
+                Log.d(TAG, "[DEBUG] ===== 媒体初始化最终状态 =====")
+                Log.d(TAG, "[DEBUG] 本地 video tracks: ${r.localParticipant.trackPublications.values.filter { it.kind == Track.Kind.VIDEO }.map { it.sid }}")
+                Log.d(TAG, "[DEBUG] 本地 audio tracks: ${r.localParticipant.trackPublications.values.filter { it.kind == Track.Kind.AUDIO }.map { it.sid }}")
+                Log.d(TAG, "[DEBUG] localRenderer ready: ${LiveKitVideoView.localViewInstance?.getRenderer() != null}")
+                Log.d(TAG, "[DEBUG] remoteRenderer ready: ${LiveKitVideoView.remoteViewInstance?.getRenderer() != null}")
             } catch (e: Exception) {
                 Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败 (Exception): ${e.javaClass.simpleName}: ${e.message}", e)
                 // 切回主线程发送事件（忽略异常）
@@ -611,7 +630,7 @@ class LiveKitC2CCallModule : UniModule() {
         }
         Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（IO线程异步执行）")
 
-        // 7c. 订阅已存在的远端参与者媒体轨道
+        // 7d. 订阅已存在的远端参与者媒体轨道
         Log.d(TAG, "[DEBUG] 步骤7d: 订阅远端参与者...")
         r.remoteParticipants.values.forEach { remote ->
             Log.d(TAG, "[DEBUG] 步骤7d: 发现远端参与者: ${remote.identity}")
@@ -650,6 +669,51 @@ class LiveKitC2CCallModule : UniModule() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[MEDIA] Failed subscribe remote: ${e.message}", e)
+            }
+        }
+    }
+
+    // ==================== 本地轨道监听与自动绑定 ====================
+    
+    /**
+     * 监听本地参与者的轨道发布事件，自动绑定到 local renderer
+     * 当 setCameraEnabled(true) 成功后会触发 LocalTrackPublished 事件
+     */
+    private fun observeLocalParticipant(local: LocalParticipant) {
+        Log.d(TAG, "[LOCAL] 开始监听本地参与者轨道事件...")
+        scope.launch {
+            try {
+                local.events.events.collect { event: ParticipantEvent ->
+                    Log.d(TAG, "[LOCAL] 收到 LocalParticipantEvent: ${event::class.simpleName}")
+                    when (event) {
+                        is ParticipantEvent.LocalTrackPublished -> {
+                            Log.d(TAG, "[LOCAL] ✅ LocalTrackPublished: kind=${event.publication.kind}, sid=${event.publication.sid}")
+                            if (event.publication.kind == Track.Kind.VIDEO) {
+                                // 自动绑定本地视频到 local renderer
+                                val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
+                                if (localRenderer != null) {
+                                    bindTrackToRenderer(event.publication, localRenderer)
+                                    Log.d(TAG, "[LOCAL] ✅ 本地视频已自动绑定到 renderer")
+                                    sendEvent("onLocalVideoReady", "Local video ready")
+                                } else {
+                                    Log.w(TAG, "[LOCAL] ⚠️ 本地视频已发布但 local renderer 未就绪（请在 nvue 中添加 <livekit-video-view type='local'>）")
+                                }
+                            }
+                            if (event.publication.kind == Track.Kind.AUDIO) {
+                                Log.d(TAG, "[LOCAL] ✅ 本地音频已发布")
+                                sendEvent("onLocalAudioReady", "Local audio ready")
+                            }
+                        }
+                        is ParticipantEvent.TrackUnpublished -> {
+                            Log.d(TAG, "[LOCAL] TrackUnpublished: kind=${event.publication.kind}")
+                        }
+                        else -> {
+                            Log.d(TAG, "[LOCAL] 未处理的本地事件: ${event::class.simpleName}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[LOCAL] ❌ 本地参与者事件监听异常: ${e.message}", e)
             }
         }
     }
