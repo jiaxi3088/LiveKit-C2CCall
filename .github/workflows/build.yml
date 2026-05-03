@@ -393,27 +393,40 @@ jobs:
             fi
           fi
 
-          # ---- Step 3c: 广泛前缀黑名单剥离 (v7 核心!) ----
-          # 不再逐个列举子包(会漏! v6 就漏了 appcompat/gson/emoji2/concurrent-futures)
-          # 改为按顶级前缀 rm -rf，覆盖整个库家族:
-          #   kotlin* kotlinx* androidx* android/support* okhttp3* okio*
-          #   com/squareup* org/jetbrains* org/intellij* com/google/gson* com/google/common*
+          # ---- Step 3c: 混合策略剥离 (v7.5 细粒度 + 广泛前缀) ----
           #
-          # 白名单保护 (这些前缀不会被删除):
+          # ═════════════════════════════════════════════════════
+          # v7.5 核心变更: 修复 kotlinx/serialization 被误删问题
+          # ═════════════════════════════════════════════════════
+          # v7.4 运行时崩溃:
+          #   NoClassDefFoundError: kotlinx/serialization/json/JsonKt
+          #
+          # 根因: "kotlinx" 前缀删除了整个 kotlinx/ 目录，包括:
+          #   - kotlinx/coroutines/*    → HBuilderX 有 ✅ 应该删除
+          #   - kotlinx/serialization/** → HBuilderX 没有 ❌ 不应删除!
+          #
+          # LiveKit SDK 依赖 kotlinx-serialization-json 做 JSON 序列化，
+          # 这个库不在 HBuilderX 基座中。
+          #
+          # 策略变更:
+          #   A) 粗粒度删除: 对大多数库仍使用顶级前缀 (androidx, kotlin, okhttp3 等)
+          #   B) 细粒度删除: 对 kotlinx 只删除已知冲突的子包，保留非冲突子包
+          #      - 删除: kotlinx/coroutines, kotlinx/atomicfu 等 HBuilderX 已有的
+          #      - 保留: kotlinx/serialization (LiveKit 需要)
+          #
+          # 白名单保护 (这些不会被删除):
           #   io/livekit/  livekit/org/webrtc/  org/webrtc/  com/livekit/
+          #   kotlinx/serialization (LiveKit JSON 序列化依赖)
           echo ""
-          echo "[Step 3c] Prefix-based strip (v7 broad blacklist)..."
+          echo "[Step 3c] Hybrid strip strategy (v7.5 fine-grained kotlinx)..."
           
           STRIP_BEFORE=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
           STRIPPED_PKGS=""
           
-          # 定义黑名单前缀 (每个都是顶级目录名)
-          # v7.2: 新增 _COROUTINE (kotlinx-coroutines 内部调试类的顶层包)
-          #       这些类如 _COROUTINE.ArtificialStackFrames 不在 kotlinx/ 目录下!
-          BLACKLIST_PREFIXES=(
+          # === 策略A: 粗粒度前缀删除 (整目录删除) ===
+          BROAD_BLACKLIST=(
             "_COROUTINE"
             "kotlin"
-            "kotlinx"
             "androidx"
             "android"
             "okhttp3"
@@ -425,13 +438,55 @@ jobs:
             "com/google/common"
           )
           
-          for prefix in "${BLACKLIST_PREFIXES[@]}"; do
+          for prefix in "${BROAD_BLACKLIST[@]}"; do
             if [ -d "$MERGED_CLASSES/$prefix" ]; then
               cnt=$(find "$MERGED_CLASSES/$prefix" -name "*.class" 2>/dev/null | wc -l)
               rm -rf "$MERGED_CLASSES/$prefix" 2>/dev/null || true
               STRIPPED_PKGS="${STRIPPED_PKGS}    ✗ $prefix/ ($cnt classes)\n"
             fi
           done
+          
+          # === 策略B: kotlinx 细粒度删除 (只删冲突子包) ===
+          # kotlinx 下不同子包的命运不同:
+          #   子包                    HBuilderX 有?  操作
+          #   ────────────────────────────────────────
+          #   kotlinx/coroutines     ✅ 有           删除
+          #   kotlinx/serialization  ❌ 没有         保留 (LiveKit 需要!)
+          #   kotlinx/atomicfu       ✅ 通常有       删除
+          #   kotlinx/其他未知        ?              安全起见也删除
+          KOTLINX_STRIP_SUBS=(
+            "kotlinx/coroutines"
+            "kotlinx/atomicfu"
+          )
+          KOTLINX_KEEP="kotlinx/serialization"
+          
+          echo "  [kotlinx fine-grained]:"
+          if [ -d "$MERGED_CLASSES/kotlinx" ]; then
+            # 先列出所有 kotlinx 子目录用于诊断
+            echo "    Found kotlinx sub-packages:"
+            find "$MERGED_CLASSES/kotlinx" -maxdepth 1 -type d 2>/dev/null | while read sub; do
+              scnt=$(find "$sub" -name "*.class" 2>/dev/null | wc -l)
+              echo "      $(basename $sub)/ ($scnt classes)"
+            done
+            
+            # 删除已知冲突的 kotlinx 子包
+            for ksub in "${KOTLINX_STRIP_SUBS[@]}"; do
+              if [ -d "$MERGED_CLASSES/$ksub" ]; then
+                kcnt=$(find "$MERGED_CLASSES/$ksub" -name "*.class" 2>/dev/null | wc -l)
+                rm -rf "$MERGED_CLASSES/$ksub" 2>/dev/null || true
+                STRIPPED_PKGS="${STRIPPED_PKGS}    ✗ $ksub/ ($kcnt classes)\n"
+                echo "    ✗ Removed: $ksub/ ($kcnt classes)"
+              fi
+            done
+            
+            # 验证 kotlinx/serialization 被保留
+            if [ -d "$MERGED_CLASSES/$KOTLINX_KEEP" ]; then
+              keep_cnt=$(find "$MERGED_CLASSES/$KOTLINX_KEEP" -name "*.class" 2>/dev/null | wc -l)
+              echo "    ✔ PRESERVED: $KOTLINX_KEEP/ ($keep_cnt classes) ← LiveKit needs this!"
+            else
+              echo "    ⚠️ WARNING: $KOTLINX_KEEP/ NOT FOUND! LiveKit may crash at runtime!"
+            fi
+          fi
           
           STRIP_AFTER=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
           STRIPPED=$((STRIP_BEFORE - STRIP_AFTER))
@@ -452,6 +507,13 @@ jobs:
               echo "  ✗ MISSING: $wp/ ⚠️"
             fi
           done
+          # kotlinx/serialization 是 LiveKit JSON 序列化必需的 (v7.5 关键保护!)
+          if [ -d "$MERGED_CLASSES/kotlinx/serialization" ]; then
+            ser_cnt=$(find "$MERGED_CLASSES/kotlinx/serialization" -name "*.class" 2>/dev/null | wc -l)
+            echo "  ✔ kotlinx/serialization/ (LiveKit JSON, $ser_cnt classes)"
+          else
+            echo "  ✗ CRITICAL MISSING: kotlinx/serialization/ ⚠️⚠️ LiveKit.create() 将崩溃!"
+          fi
           # org/webrtc/ 是可选的 (标准 WebRTC，非必需)
           if [ -d "$MERGED_CLASSES/org/webrtc" ]; then
             wc_cnt=$(find "$MERGED_CLASSES/org/webrtc" -name "*.class" 2>/dev/null | wc -l)
@@ -620,7 +682,7 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "  Full Fat AAR 构建完成! (v7.4 仅打包 .class 文件)"
+          echo "  Full Fat AAR 构建完成! (v7.5 kotlinx 细粒度剥离)"
           echo "  文件:    livekit-c2c-fat.aar"
           echo "  总大小:  $FAT_SIZE"
           echo "  其中:"
