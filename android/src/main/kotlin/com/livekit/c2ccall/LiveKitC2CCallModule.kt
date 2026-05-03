@@ -1,6 +1,7 @@
 package com.livekit.c2ccall
 
 import android.content.Context
+import androidx.core.content.ContextCompat
 import android.media.MediaPlayer
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -593,13 +594,13 @@ class LiveKitC2CCallModule : UniModule() {
             try {
                 // === 第1步: 权限预检查 ===
                 val hasCameraPerm = try {
-                    androidx.core.content.ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
                 } catch (e: Exception) {
                     Log.w(TAG, "[DEBUG] ⚠️ 权限检查异常(CAMERA)，假设有权限: ${e.message}")
                     true // 安全降级：假设有权限，让 SDK 自己处理权限错误
                 }
                 val hasAudioPerm = try {
-                    androidx.core.content.ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    ContextCompat.checkSelfPermission(appContext!!, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
                 } catch (e: Exception) {
                     Log.w(TAG, "[DEBUG] ⚠️ 权限检查异常(AUDIO)，假设有权限: ${e.message}")
                     true
