@@ -429,184 +429,180 @@ jobs:
             else
               echo "  MISS $p/ — $d"
             fi
-          donester]
-  pull_request:
-    branches: [main, master]
-  workflow_dispatch:
+                    done
 
-jobs:
-  build-android:
-    runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-    steps:
-      - uses: actions/checkout@v4
+          # ---- Step 3e: 创建 classes.jar (只包含 .class 文件) ----
+          CLASSES_OUT="$WORK/classes.jar"
+          echo "[Step 3e] Creating classes.jar (class files only)..."
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+          PACKED_CNT=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
+          (cd "$MERGED_CLASSES" && \
+            find . -name "*.class" | zip -q -r "$CLASSES_OUT" -@ )
+          CLS_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
+          echo "  ✓ classes.jar created: $CLS_SIZE ($PACKED_CNT class files)"
 
-      - name: Install Android SDK components
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la "$ANDROID_HOME/platforms/" 2>/dev/null || echo "No platforms dir yet"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
-          echo "Installed platforms:"
-          ls "$ANDROID_HOME/platforms/"
+          # ---- Step 4: 合并 .so 文件 (WebRTC native libs) ----
+          echo ""
+          echo "[Step 4] Merging .so files..."
+          JNI_DIR="$WORK/jni"
+          mkdir -p "$JNI_DIR"
+          SO_COUNT=0
 
-      - name: Create uni-app SDK stub AAR
-        run: |
-          set -e
-          STUB_DIR=ci-stubs/build
-          ANDROID_JAR="$ANDROID_HOME/platforms/android-34/android.jar"
-          
-          echo "=== Android JAR check ==="
-          ls -la "$ANDROID_JAR"
-          
-          mkdir -p $STUB_DIR/classes
-          
-          echo "=== Compiling stub sources ==="
-          javac -d $STUB_DIR/classes \
-            -source 17 -target 17 \
-            -cp "$ANDROID_JAR" \
-            ci-stubs/android/*.java
-          
-          echo "=== Creating classes.jar ==="
-          (cd $STUB_DIR/classes && jar cf ../classes.jar .)
-          
-          echo "=== Creating stub AAR ==="
-          mkdir -p $STUB_DIR/aar
-          echo '<?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.dcloud.feature.uniapp"/>' > $STUB_DIR/aar/AndroidManifest.xml
-          cp $STUB_DIR/classes.jar $STUB_DIR/aar/classes.jar
-          (cd $STUB_DIR/aar && jar cf ../../uniapp-v8-release.aar .)
-          
-          mkdir -p libs
-          cp ci-stubs/uniapp-v8-release.aar libs/
-          
-          echo "=== Stub AAR created successfully ==="
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Regenerate Gradle Wrapper (fix incomplete JAR)
-        working-directory: android
-        run: |
-          echo "=== Checking gradlew wrapper ==="
-          ls -la gradlew gradle/wrapper/gradle-wrapper.jar 2>/dev/null || echo "Wrapper files missing"
-          # Use system Gradle to regenerate a correct wrapper
-          gradle wrapper --gradle-version 8.10.2 --distribution-type bin
-          chmod +x gradlew
-          echo "=== Regenerated wrapper ==="
-          ls -la gradle/wrapper/gradle-wrapper.jar
-
-      - name: Build Android AAR
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
-          echo "=== Build output ==="
-          ls -la build/outputs/aar/ 2>/dev/null || { echo "ERROR: No AAR output directory found!"; exit 1; }
-          if [ ! -f build/outputs/aar/*-release.aar ]; then
-            echo "=== BUILD FAILED - No AAR found ==="
-            tail -80 build.log
-            exit 1
+          # 从插件自身 AAR 提取 .so
+          if [ -d "$PLUGIN_EXTRACT/jni" ]; then
+            cp -r "$PLUGIN_EXTRACT/jni/"* "$JNI_DIR/" 2>/dev/null || true
+            PLUGIN_SO=$(find "$JNI_DIR" -name "*.so" 2>/dev/null | wc -l)
+            echo "  Plugin .so: $PLUGIN_SO"
+            SO_COUNT=$((SO_COUNT + PLUGIN_SO))
           fi
-          echo "AAR file(s):"
-          ls -la build/outputs/aar/*-release.aar
 
-      - name: Create Full Fat AAR (LiveKit + WebRTC + .so ALL IN)
-        working-directory: android
-        run: |
-          set -e
+          # 从 LiveKit SDK AAR 提取 .so
+          if [ -d "$LIVEKIT_DIR/jni" ]; then
+            for arch_dir in "$LIVEKIT_DIR/jni/"*/; do
+              [ -d "$arch_dir" ] || continue
+              ARCH=$(basename "$arch_dir")
+              mkdir -p "$JNI_DIR/$ARCH"
+              cp "$arch_dir"*.so "$JNI_DIR/$ARCH/" 2>/dev/null || true
+            done
+            LK_SO=$(find "$LIVEKIT_DIR/jni" -name "*.so" 2>/dev/null | wc -l)
+            echo "  LiveKit .so: $LK_SO"
+            SO_COUNT=$((SO_COUNT + LK_SO))
+          fi
 
-          # ====== Full Fat AAR: 全量依赖自包含 v8 (保守全量打包) ======
-          # 此 AAR 包含: 插件代码 + LiveKit SDK + 全部传递依赖 + WebRTC + arm64 .so
-          # ════════════════════════════════════════════════════════════════════
-          # v8 核心变更: 废除黑名单模式，全量保留所有 .class 文件
-          # ════════════════════════════════════════════════════════════════════
-          #
-          # 黑名单模式的死胡同教训:
-          #   v7    删除 kotlinx/*     → 运行时缺 JsonKt           ❌
-          #   v7.5  保留 serialization → 运行时缺 SdpFactory       ❌
-          #   下一步? 可能还缺 livekit.org.webrtc.xxx 等...
-          #
-          # 根因: 无法预先枚举 LiveKit SDK 的所有间接依赖
-          #
-          # v8 策略: 不再主动删除任何 .class 文件!
-          #   仅删除 _COROUTINE/* (唯一确认的顶层包冲突源)
-          #   打包时只包含 *.class (避免 META-INF 资源冲突)
-          # v4/v3 修复保留:
-          #   1) Step 6 验证改为检查 classes.jar 内部内容
-          #   2) 新增策略5: 全量扫描 Gradle cache 定位 livekit.org.webrtc Java 类
+          # 从 WebRTC AAR 提取 .so
+          if [ -d "$WEBRTC_DIR/jni" ]; then
+            for arch_dir in "$WEBRTC_DIR/jni/"*/; do
+              [ -d "$arch_dir" ] || continue
+              ARCH=$(basename "$arch_dir")
+              mkdir -p "$JNI_DIR/$ARCH"
+              cp "$arch_dir"*.so "$JNI_DIR/$ARCH/" 2>/dev/null || true
+            done
+            WC_SO=$(find "$WEBRTC_DIR/jni" -name "*.so" 2>/dev/null | wc -l)
+            echo "  WebRTC .so: $WC_SO"
+            SO_COUNT=$((SO_COUNT + WC_SO))
+          fi
 
-          ANDROID_ROOT="$(pwd)"
-          WORK="$ANDROID_ROOT/fat-aar-work"
-          SRC_AAR="$(ls $ANDROID_ROOT/build/outputs/aar/*-release.aar | head -1)"
-          
-          echo "=== Full Fat AAR Build ==="
-          echo "  Source: $(basename $SRC_AAR)"
-          echo "  Work:   $WORK"
-          
-          rm -rf "$WORK" && mkdir -p "$WORK"
+          # 从所有依赖 AAR 中提取 .so (遍历 deps-runtime.txt)
+          if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
+            while IFS= read -r DEP_PATH; do
+              [ -f "$DEP_PATH" ] || continue
+              [[ "$DEP_PATH" == *.aar ]] || continue
+              TMP_SO="$WORK/so-tmp-$RANDOM"
+              unzip -qo "$DEP_PATH" -d "$TMP_SO" 2>/dev/null || true
+              if [ -d "$TMP_SO/jni" ]; then
+                for arch_dir in "$TMP_SO/jni/"*/; do
+                  [ -d "$arch_dir" ] || continue
+                  ARCH=$(basename "$arch_dir")
+                  mkdir -p "$JNI_DIR/$ARCH"
+                  cp "$arch_dir"*.so "$JNI_DIR/$ARCH/" 2>/dev/null || true
+                done
+              fi
+              rm -rf "$TMP_SO"
+            done < "$ANDROID_ROOT/build/exports/deps-runtime.txt"
+          fi
 
-          # ---- Step 1: 解压插件自身 AAR ----
-          PLUGIN_EXTRACT="$WORK/plugin-extract"
-          mkdir -p "$PLUGIN_EXTRACT"
-          unzip -qo "$SRC_AAR" -d "$PLUGIN_EXTRACT"
-          echo "[Step 1] ✓ Plugin extracted"
+          SO_COUNT=$(find "$JNI_DIR" -name "*.so" 2>/dev/null | wc -l)
+          echo "  Total .so files: $SO_COUNT"
 
-          # ---- Step 2: 定位并提取 LiveKit SDK ----
-          LIVEKIT_DIR="$WORK/livekit-sdk"
-          mkdir -p "$LIVEKIT_DIR"
-          GRADLE_CACHE="$HOME/.gradle/caches"
-          
-          echo "[Step 2] Locating LiveKit SDK in Gradle cache..."
-          
-          LIVEKIT_AAR=""
-          for search_path in \
-            "$GRADLE_CACHE/modules-2/files-2.1/io.livekit/livekit-android/2.25.1" \
-            "$GRADLE_CACHE/modules-2/files-livekit-android/io.livekit/livekit-android/2.25.1"; do
-            [ -d "$search_path" ] || continue
-            CANDIDATE=$(find "$search_path" -maxdepth 3 -name "livekit-android-*.aar" \
-              ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
-            [ -n "$CANDIDATE" ] && { LIVEKIT_AAR="$CANDIDATE"; break; }
+          if [ "$SO_COUNT" -gt 0 ]; then
+            echo "  Architectures:"
+            find "$JNI_DIR" -maxdepth 1 -type d ! -name "." | while read arch; do
+              scnt=$(find "$arch" -name "*.so" 2>/dev/null | wc -l)
+              ssize=$(du -sh "$arch" 2>/dev/null | cut -f1)
+              [ "$scnt" -gt 0 ] && echo "    $(basename $arch)/ ($scnt files, $ssize)"
+            done
+          fi
+
+          # ---- Step 5: 组装最终 Fat AAR ----
+          FAT_AAR="$ANDROID_ROOT/livekit-c2c-fat.aar"
+          echo ""
+          echo "[Step 5] Assembling final Fat AAR..."
+
+          rm -f "$FAT_AAR"
+          mkdir -p "$WORK/fat-aar"
+
+          # AndroidManifest.xml
+          if [ -f "$PLUGIN_EXTRACT/AndroidManifest.xml" ]; then
+            cp "$PLUGIN_EXTRACT/AndroidManifest.xml" "$WORK/fat-aar/"
+          else
+            echo '<manifest package="com.livekit.c2ccall"/>' > "$WORK/fat-aar/AndroidManifest.xml"
+          fi
+
+          # classes.jar
+          cp "$CLASSES_OUT" "$WORK/fat-aar/classes.jar"
+
+          # .so files
+          if [ "$SO_COUNT" -gt 0 ] && [ -d "$JNI_DIR" ]; then
+            cp -r "$JNI_DIR" "$WORK/fat-aar/jni"
+          fi
+
+          # res (从插件 AAR)
+          if [ -d "$PLUGIN_EXTRACT/res" ]; then
+            cp -r "$PLUGIN_EXTRACT/res" "$WORK/fat-aar/"
+          fi
+
+          # 打包成 AAR
+          (cd "$WORK/fat-aar" && jar cf "$FAT_AAR" .)
+
+          FAT_SIZE=$(du -h "$FAT_AAR" | cut -f1)
+          FAT_CLASSES=$(unzip -l "$FAT_AAR" 2>/dev/null | grep "\.class$" | wc -l)
+          FAT_SO=$(unzip -l "$FAT_AAR" 2>/dev/null | grep "\.so$" | wc -l)
+          echo "  ✓ Fat AAR: $FAT_SIZE ($FAT_CLASSES classes, $FAT_SO .so)"
+          echo "  Path: $FAT_AAR"
+
+          # ---- Step 6: 验证 AAR ----
+          echo ""
+          echo "[Step 6] Verifying Fat AAR..."
+
+          ERRORS=0
+
+          # 检查 classes.jar 存在且非空
+          if ! unzip -l "$FAT_AAR" 2>/dev/null | grep -q "classes.jar"; then
+            echo "  ✗ FAIL: No classes.jar in AAR!"
+            ERRORS=$((ERRORS + 1))
+          else
+            CLS_IN_AAR=$(unzip -p "$FAT_AAR" classes.jar 2>/dev/null | unzip -l /dev/stdin 2>/dev/null | grep "\.class$" | wc -l)
+            echo "  ✓ classes.jar present ($CLS_IN_AAR classes inside)"
+            if [ "$CLS_IN_AAR" -lt 100 ]; then
+              echo "  ⚠ WARNING: Very few classes in AAR (expected 1000+ for full-fat)"
+            fi
+          fi
+
+          # 检查关键类存在
+          echo "  Checking critical classes inside AAR:"
+          for check_cls in "io/livekit/" "com/livekit/" "kotlinx/serialization/json/JsonKt.class"; do
+            if unzip -p "$FAT_AAR" classes.jar 2>/dev/null | unzip -t /dev/stdin "$check_cls" >/dev/null 2>&1; then
+              echo "    ✓ $check_cls"
+            else
+              echo "    ✗ MISSING: $check_cls"
+              ERRORS=$((ERRORS + 1))
+            fi
           done
 
-          if [ -z "$LIVEKIT_AAR" ]; then
-            LIVEKIT_AAR=$(find "$GRADLE_CACHE" -path "*livekit-android*2.25.1*" \
-              -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+          # 检查 AndroidManifest.xml
+          if ! unzip -l "$FAT_AAR" 2>/dev/null | grep -q "AndroidManifest.xml"; then
+            echo "  ✗ FAIL: No AndroidManifest.xml!"
+            ERRORS=$((ERRORS + 1))
           fi
 
-          if [ -n "$LIVEKIT_AAR" ] && [ -f "$LIVEKIT_AAR" ]; then
-            unzip -qo "$LIVEKIT_AAR" -d "$LIVEKIT_DIR" 2>/dev/null || true
-            if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ ! -s "$LIVEKIT_DIR/classes.jar" ]; then
-              rm -f "$LIVEKIT_DIR/classes.jar"
-            fi
-            echo "[Step 2] ✓ LiveKit SDK found: $(basename $LIVEKIT_AAR) ($(du -h $LIVEKIT_AAR | cut -f1))"
-            ls -la "$LIVEKIT_DIR/" 2>/dev/null || true
-
-            # 诊断: 检查 LiveKit SDK 自身是否已包含 livekit.org.webrtc 类
-            if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
-              LK_INTERNAL_WC=$(unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "livekit/org/webrtc/" | head -5)
-              LK_INTERNAL_IO=$(unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "io/livekit/" | wc -l)
-              echo "[Step 2]   Diagnostic: io.livekit.* classes in SDK: $LK_INTERNAL_IO"
-              if [ -n "$LK_INTERNAL_WC" ]; then
-                echo "[Step 2]   ✅ livekit.org.webrtc.* found INSIDE livekit-android AAR:"
-                echo "$LK_INTERNAL_WC"
-              else
-                echo "[Step 2]   ℹ livekit.org.webrtc.* NOT inside livekit-android (expected in separate artifact)"
-              fi
-              # 列出 LiveKit classes.jar 的顶层包
-              echo "[Step 2]   Top packages in livekit-android classes.jar:"
-              unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "\.class$" | cut -d'/' -f1-3 | sort -u | head -20
-            fi
-          else
-            echo "[Step 2] ✗ FATAL: LiveKit AAR not found!"
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "  ✗ VERIFICATION FAILED with $ERRORS error(s)!"
             exit 1
           fi
+
+          echo "  ✓ Verification PASSED"
+
+      - name: Upload Android AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aar
+          path: android/livekit-c2c-fat.aar
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Confirm Android build
+        if: always()
+        run: echo "Android AAR build completed (check above for errors)"
 
   build-ios:
     runs-on: macos-latest
