@@ -46,7 +46,8 @@ class LiveKitVideoView @JvmOverloads constructor(
         fun isWebRtcAvailable(): Boolean {
             if (webrtcAvailable == null) {
                 webrtcAvailable = try {
-                    Class.forName("org.webrtc.EglBase")
+                    // LiveKit Android SDK 2.x 使用 repackaged WebRTC: livekit.org.webrtc.*
+                    Class.forName("livekit.org.webrtc.EglBase")
                     Log.i(TAG, "WebRTC runtime check: AVAILABLE")
                     true
                 } catch (e: Exception) {
@@ -66,7 +67,7 @@ class LiveKitVideoView @JvmOverloads constructor(
             if (!isWebRtcAvailable()) return null
             if (sharedEglBase == null) {
                 try {
-                    val eglBaseClass = Class.forName("org.webrtc.EglBase")
+                    val eglBaseClass = Class.forName("livekit.org.webrtc.EglBase")
                     val createMethod = eglBaseClass.getMethod("create")
                     sharedEglBase = createMethod.invoke(null)
                     Log.i(TAG, "Shared EglBase created via reflection")
@@ -107,7 +108,8 @@ class LiveKitVideoView @JvmOverloads constructor(
          */
         fun createSurfaceViewRenderer(context: Context): Any? {
             return try {
-                val svrClass = Class.forName("org.webrtc.SurfaceViewRenderer")
+                // LiveKit Android SDK 2.x 使用 repackaged WebRTC: livekit.org.webrtc.*
+                val svrClass = Class.forName("livekit.org.webrtc.SurfaceViewRenderer")
                 val constructor = svrClass.getConstructor(Context::class.java)
                 constructor.newInstance(context)
             } catch (e: Exception) {
@@ -131,13 +133,14 @@ class LiveKitVideoView @JvmOverloads constructor(
                 val eglContext = eglContextField.get(eglBase)
 
                 // renderer.init(eglBase.eglBaseContext, null)
-                val rendererEventsClsName = "org.webrtc.RendererCommon\$RendererEvents"
+                // LiveKit Android SDK 2.x 使用 repackaged WebRTC: livekit.org.webrtc.*
+                val rendererEventsClsName = "livekit.org.webrtc.RendererCommon\$RendererEvents"
                 val initMethod = renderer.javaClass.getMethod("init", eglContext.javaClass, Class.forName(rendererEventsClsName))
                 initMethod.invoke(renderer, eglContext, null)
 
                 // setScalingType(SCALE_ASPECT_FIT)
-                val rcClass = Class.forName("org.webrtc.RendererCommon")
-                val stClass = Class.forName("org.webrtc.RendererCommon\$ScalingType")
+                val rcClass = Class.forName("livekit.org.webrtc.RendererCommon")
+                val stClass = Class.forName("livekit.org.webrtc.RendererCommon\$ScalingType")
                 val scaleFit = stClass.getField("SCALE_ASPECT_FIT").get(null)
                 val setScalingMethod = renderer.javaClass.getMethod("setScalingType", stClass)
                 setScalingMethod.invoke(renderer, scaleFit)

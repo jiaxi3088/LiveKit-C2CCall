@@ -701,7 +701,8 @@ class LiveKitC2CCallModule : UniModule() {
     private fun invokeAddSink(track: Any, renderer: Any): Boolean {
         return try {
             // 查找 addSink 方法 — 接受 VideoSink 参数（SurfaceViewRenderer 实现了它）
-            val sinkClass = Class.forName("org.webrtc.VideoSink")
+            // LiveKit Android SDK 2.x 使用 repackaged WebRTC: livekit.org.webrtc.*
+            val sinkClass = Class.forName("livekit.org.webrtc.VideoSink")
             val method = track.javaClass.methods.find {
                 it.name == "addSink" && it.parameterCount == 1 &&
                         sinkClass.isAssignableFrom(it.parameterTypes[0])
