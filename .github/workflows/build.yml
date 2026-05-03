@@ -369,6 +369,16 @@ jobs:
             fi
           fi
 
+          # 3b-extra: 合并 Step 2b 从 shadow-all.jar 提取出的 WebRTC Java 类
+          # android-prefixed AAR 可能只含 .so，livekit.org.webrtc.* Java 类位于 Gradle transformed shadow-all.jar
+          if [ -d "$WEBRTC_DIR/java-classes" ]; then
+            WEBRTC_JAVA_CNT=$(find "$WEBRTC_DIR/java-classes" -name "*.class" 2>/dev/null | wc -l)
+            if [ "$WEBRTC_JAVA_CNT" -gt 0 ]; then
+              cp -R "$WEBRTC_DIR/java-classes/." "$MERGED_CLASSES/"
+              echo "  ✓ WebRTC Java classes from shadow-all.jar ($WEBRTC_JAVA_CNT classes)"
+            fi
+          fi
+
           # ---- Step 3c: v8 保守全量打包 (Conservative Full Pack) ----
           #
           # ═════════════════════════════════════════════════════
@@ -420,16 +430,20 @@ jobs:
           echo ""
           echo "[Step 3d] Critical dependency check:"
           for dep in "io/livekit|LiveKit core" "com/livekit|Plugin" \
-                    "livekit/org/webrtc|Repackaged WebRTC" "org/webrtc|WebRTC(opt)" \
+                    "livekit/org/webrtc|Repackaged WebRTC package" \
+                    "livekit/org/webrtc/PeerConnectionFactory.class|Repackaged WebRTC key class" \
+                    "org/webrtc|WebRTC(opt)" \
                     "kotlinx/serialization|Serialization(JSON)" "android/javax/sdp|SDP Factory"; do
             p="${dep%%|*}"; d="${dep##*|}"
             if [ -d "$MERGED_CLASSES/$p" ]; then
               c=$(find "$MERGED_CLASSES/$p" -name "*.class" 2>/dev/null | wc -l)
               echo "  OK $p/ ($c) — $d"
+            elif [ -f "$MERGED_CLASSES/$p" ]; then
+              echo "  OK $p — $d"
             else
-              echo "  MISS $p/ — $d"
+              echo "  MISS $p — $d"
             fi
-                    done
+          done
 
           # ---- Step 3e: 创建 classes.jar (只包含 .class 文件) ----
           CLASSES_OUT="$WORK/classes.jar"
@@ -437,9 +451,14 @@ jobs:
 
           PACKED_CNT=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
           (cd "$MERGED_CLASSES" && \
-            find . -name "*.class" | zip -q -r "$CLASSES_OUT" -@ )
+            find . -name "*.class" | zip -q "$CLASSES_OUT" -@ )
           CLS_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
-          echo "  ✓ classes.jar created: $CLS_SIZE ($PACKED_CNT class files)"
+          CLS_CREATED=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
+          echo "  ✓ classes.jar created: $CLS_SIZE ($CLS_CREATED/$PACKED_CNT class files)"
+          if [ "$CLS_CREATED" -lt 100 ]; then
+            echo "  ✗ FAIL: classes.jar contains too few class files!"
+            exit 1
+          fi
 
           # ---- Step 4: 合并 .so 文件 (WebRTC native libs) ----
           echo ""
@@ -545,9 +564,9 @@ jobs:
           (cd "$WORK/fat-aar" && jar cf "$FAT_AAR" .)
 
           FAT_SIZE=$(du -h "$FAT_AAR" | cut -f1)
-          FAT_CLASSES=$(unzip -l "$FAT_AAR" 2>/dev/null | grep "\.class$" | wc -l)
+          FAT_CLASSES=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
           FAT_SO=$(unzip -l "$FAT_AAR" 2>/dev/null | grep "\.so$" | wc -l)
-          echo "  ✓ Fat AAR: $FAT_SIZE ($FAT_CLASSES classes, $FAT_SO .so)"
+          echo "  ✓ Fat AAR: $FAT_SIZE ($FAT_CLASSES classes inside classes.jar, $FAT_SO .so)"
           echo "  Path: $FAT_AAR"
 
           # ---- Step 6: 验证 AAR ----
@@ -555,26 +574,36 @@ jobs:
           echo "[Step 6] Verifying Fat AAR..."
 
           ERRORS=0
+          VERIFY_CLASSES_JAR="$WORK/verify-classes.jar"
 
-          # 检查 classes.jar 存在且非空
+          # 检查 classes.jar 存在且非空；嵌套 ZIP 不能直接通过 /dev/stdin 给 unzip 校验，必须先落盘
           if ! unzip -l "$FAT_AAR" 2>/dev/null | grep -q "classes.jar"; then
             echo "  ✗ FAIL: No classes.jar in AAR!"
             ERRORS=$((ERRORS + 1))
+          elif ! unzip -p "$FAT_AAR" classes.jar > "$VERIFY_CLASSES_JAR" 2>/dev/null || [ ! -s "$VERIFY_CLASSES_JAR" ]; then
+            echo "  ✗ FAIL: classes.jar in AAR is empty or unreadable!"
+            ERRORS=$((ERRORS + 1))
           else
-            CLS_IN_AAR=$(unzip -p "$FAT_AAR" classes.jar 2>/dev/null | unzip -l /dev/stdin 2>/dev/null | grep "\.class$" | wc -l)
+            CLS_IN_AAR=$(unzip -l "$VERIFY_CLASSES_JAR" 2>/dev/null | grep "\.class$" | wc -l)
             echo "  ✓ classes.jar present ($CLS_IN_AAR classes inside)"
             if [ "$CLS_IN_AAR" -lt 100 ]; then
-              echo "  ⚠ WARNING: Very few classes in AAR (expected 1000+ for full-fat)"
+              echo "  ✗ FAIL: Very few classes in AAR (expected 1000+ for full-fat)"
+              ERRORS=$((ERRORS + 1))
             fi
           fi
 
           # 检查关键类存在
           echo "  Checking critical classes inside AAR:"
-          for check_cls in "io/livekit/" "com/livekit/" "kotlinx/serialization/json/JsonKt.class"; do
-            if unzip -p "$FAT_AAR" classes.jar 2>/dev/null | unzip -t /dev/stdin "$check_cls" >/dev/null 2>&1; then
-              echo "    ✓ $check_cls"
+          for check_item in "io/livekit/.*[.]class$::io/livekit/*" \
+                            "com/livekit/.*[.]class$::com/livekit/*" \
+                            "kotlinx/serialization/json/JsonKt[.]class$::kotlinx/serialization/json/JsonKt.class" \
+                            "livekit/org/webrtc/PeerConnectionFactory[.]class$::livekit/org/webrtc/PeerConnectionFactory.class"; do
+            check_pattern="${check_item%%::*}"
+            check_label="${check_item##*::}"
+            if [ -f "$VERIFY_CLASSES_JAR" ] && unzip -l "$VERIFY_CLASSES_JAR" 2>/dev/null | grep -Eq "$check_pattern"; then
+              echo "    ✓ $check_label"
             else
-              echo "    ✗ MISSING: $check_cls"
+              echo "    ✗ MISSING: $check_label"
               ERRORS=$((ERRORS + 1))
             fi
           done
