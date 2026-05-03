@@ -210,33 +210,75 @@ jobs:
             echo "[Step 2b] ⚠ WebRTC AAR not found, video may not work"
           fi
 
-          # ---- Step 3: 合并全部 classes.jar (Full Fat) ----
+          # ---- Step 3: 合并全部 classes.jar (True Fat AAR) ----
+          # 策略: 将 releaseRuntimeClasspath 中所有非基座的依赖全部打入
+          # 排除列表: uniapp(编译用)、插件自身、HBuilderX基座自带(androidx/kotlin-stdlib/fastjson)
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "[Step 3] Merging ALL classes (Full Fat)..."
+          echo "[Step 3] Merging ALL runtime dependencies (True Fat)..."
 
-          # 3a: 插件代码
+          # 3a: 插件自身代码
           if [ -f "$PLUGIN_EXTRACT/classes.jar" ] && [ -s "$PLUGIN_EXTRACT/classes.jar" ]; then
             unzip -qo "$PLUGIN_EXTRACT/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
             echo "  ✓ Plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 3b: LiveKit SDK 类 (Full Fat 核心：不再依赖 Maven!)
-          if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
-            unzip -qo "$LIVEKIT_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-            echo "  ✓ LiveKit SDK classes ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1))"
-          else
-            echo "  ✗ No LiveKit classes.jar!"
-            exit 1
-          fi
+          # 3b: 从 exportDeps 获取全部运行时依赖并逐个合并
+          # 先确保 exportDeps 已执行
+          ./gradlew :exportDeps --quiet 2>/dev/null || true
 
-          # 3c: WebRTC (android-prefixed) 类
-          if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
-            unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-            echo "  ✓ WebRTC classes ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
+          if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
+            DEP_CNT=0
+            SKIPPED_CNT=0
+            # HBuilderX 基座自带的库（不需要打入）
+            SKIP_PATTERNS="uniapp|androidx\.|kotlin-stdlib|kotlinx-coroutines.*core.*[0-9]|fastjson|org.jetbrains.annotations"
+            
+            while IFS= read -r DEP_PATH; do
+              [ -f "$DEP_PATH" ] || continue
+              
+              # 跳过插件自身
+              basename "$DEP_PATH" | grep -qi "^livekit-c2ccall" && { SKIPPED_CNT=$((SKIPPED_CNT+1)); continue; }
+              
+              # 跳过 HBuilderX 基座自带
+              basename "$DEP_PATH" | grep -qiE "($SKIP_PATTERNS)" && { 
+                echo "    ⊘ $(basename $DEP_PATH) (HBuilderX base)"
+                SKIPPED_CNT=$((SKIPPED_CNT+1))
+                continue
+              }
+              
+              # 解压 classes.jar（AAR）或直接解压 JAR
+              TMP_EXTRACT="$WORK/dep-tmp-$RANDOM"
+              mkdir -p "$TMP_EXTRACT"
+              if [[ "$DEP_PATH" == *.aar ]]; then
+                unzip -qo "$DEP_PATH" -d "$TMP_EXTRACT" 2>/dev/null || true
+                SRC_JAR="$TMP_EXTRACT/classes.jar"
+              else
+                SRC_JAR="$DEP_PATH"
+              fi
+              
+              if [ -f "$SRC_JAR" ] && [ -s "$SRC_JAR" ]; then
+                unzip -qo "$SRC_JAR" -d "$MERGED_CLASSES" 2>/dev/null || true
+                DEP_SIZE=$(du -h "$SRC_JAR" | cut -f1)
+                echo "  ✓ $(basename $DEP_PATH) ($DEP_SIZE)"
+                DEP_CNT=$((DEP_CNT+1))
+              fi
+              rm -rf "$TMP_EXTRACT"
+            done < "$ANDROID_ROOT/build/exports/deps-runtime.txt"
+            
+            echo "  --- Merged $DEP_CNT deps, skipped $SKIPPED_CNT (base/plugin) ---"
           else
-            echo "  ⚠ No WebRTC classes (video rendering unavailable)"
+            echo "  ⚠ No deps-runtime.txt, falling back to manual merge..."
+            
+            # 兜底: 手动合并 LiveKit + WebRTC（旧逻辑）
+            if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
+              unzip -qo "$LIVEKIT_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+              echo "  ✓ LiveKit SDK classes ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1)) (fallback)"
+            fi
+            if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
+              unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+              echo "  ✓ WebRTC classes ($(du -h $WEBRTC_DIR/classes.jar | cut -f1)) (fallback)"
+            fi
           fi
 
           # 打包最终 classes.jar
