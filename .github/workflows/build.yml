@@ -151,63 +151,90 @@ jobs:
             exit 1
           fi
 
-          # ---- Step 2b: 定位并提取 android-prefixed (WebRTC) ----
+          # ---- Step 2b: 定位并提取 livekit-android-webrtc (repackaged WebRTC) ----
+          # 关键: LiveKit 2.x 需要 livekit.org.webrtc.* (不是 org.webrtc.*)
+          # 来源: io.livekit:livekit-android-webrtc 或 io.github.webrtc-sdk:android-prefixed
           WEBRTC_DIR="$WORK/webrtc-sdk"
           mkdir -p "$WEBRTC_DIR"
 
-          echo "[Step 2b] Locating android-prefixed (WebRTC)..."
+          echo "[Step 2b] Locating repackaged WebRTC (livekit.org.webrtc.*)..."
           WEBRTC_AAR=""
 
-          # 策略1: 精确路径搜索
+          # 策略1: livekit-android-webrtc (LiveKit 官方 WebRTC 打包)
           for webrtc_search in \
-            "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk/android-prefixed/144.7559.01" \
-            "$GRADLE_CACHE/modules-2/files-livekit-android/io.github.webrtc-sdk/android-prefixed/144.7559.01"; do
+            "$GRADLE_CACHE/modules-2/files-2.1/io.livekit/livekit-android-webrtc" \
+            "$GRADLE_CACHE/modules-2/files-livekit-android/io.livekit/livekit-android-webrtc"; do
             [ -d "$webrtc_search" ] || continue
-            CANDIDATE=$(find "$webrtc_search" -maxdepth 3 -name "android-prefixed*.aar" \
+            CANDIDATE=$(find "$webrtc_search" -maxdepth 4 -name "*.aar" \
               ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
-            [ -n "$CANDIDATE" ] && { WEBRTC_AAR="$CANDIDATE"; break; }
+            [ -n "$CANDIDATE" ] && { WEBRTC_AAR="$CANDIDATE"; echo "[Step 2b]   Found via livekit-android-webrtc"; break; }
           done
 
-          # 策略2: 宽泛版本搜索
+          # 策略2: android-prefixed (io.github.webrtc-sdk)
           if [ -z "$WEBRTC_AAR" ]; then
-            WEBRTC_AAR=$(find "$GRADLE_CACHE" -path "*android-prefixed*144*" \
-              -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+            for webrtc_search in \
+              "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk/android-prefixed" \
+              "$GRADLE_CACHE/modules-2/files-livekit-android/io.github.webrtc-sdk/android-prefixed"; do
+              [ -d "$webrtc_search" ] || continue
+              CANDIDATE=$(find "$webrtc_search" -maxdepth 4 -name "android-prefixed*.aar" \
+                ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+              [ -n "$CANDIDATE" ] && { WEBRTC_AAR="$CANDIDATE"; echo "[Step 2b]   Found via android-prefixed"; break; }
+            done
           fi
 
-          # 策略3: 搜索任何版本
+          # 策略3: 宽泛搜索含 livekit.org.webrtc 的 AAR
           if [ -z "$WEBRTC_AAR" ]; then
-            WEBRTC_AAR=$(find "$GRADLE_CACHE/modules-2/files-2.1/io.github.webrtc-sdk" \
-              -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
-          fi
-
-          # 策略4: 暴力扫描含 EglBase 的 AAR（限制前50个避免太慢）
-          if [ -z "$WEBRTC_AAR" ]; then
-            echo "[Step 2b] Broad scan for EglBase..."
+            echo "[Step 2b]   Broad search for livekit.org.webrtc.PeerConnectionFactory..."
             FOUND_CNT=0
-            for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -50); do
-              if unzip -l "$wc" 2>/dev/null | grep -q "org/webrtc/EglBase"; then
+            for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -100); do
+              if unzip -l "$wc" 2>/dev/null | grep -q "livekit/org/webrtc/PeerConnectionFactory"; then
                 WEBRTC_AAR="$wc"
                 echo "[Step 2b]   Found: $(basename $wc)"
                 break
               fi
               FOUND_CNT=$((FOUND_CNT + 1))
             done
-            echo "[Step 2b]   Scanned $FOUND_CNT AARs"
+            echo "[Step 2b]   Scanned $FOUND_CNT AARs for livekit.org.webrtc"
+          fi
+
+          # 策略4: 搜索含 org/webrtc/EglBase 的（标准 WebRTC 作为最后兜底）
+          if [ -z "$WEBRTC_AAR" ]; then
+            echo "[Step 2b]   Fallback: searching for org.webrtc.EglBase..."
+            for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -50); do
+              if unzip -l "$wc" 2>/dev/null | grep -q "org/webrtc/EglBase"; then
+                WEBRTC_AAR="$wc"
+                echo "[Step 2b]   Found (fallback): $(basename $wc)"
+                break
+              fi
+            done
           fi
 
           if [ -n "$WEBRTC_AAR" ] && [ -f "$WEBRTC_AAR" ]; then
             unzip -qo "$WEBRTC_AAR" -d "$WEBRTC_DIR" 2>/dev/null || true
             echo "[Step 2b] ✓ WebRTC found: $(basename $WEBRTC_AAR) ($(du -h $WEBRTC_AAR | cut -f1))"
+            
+            # 验证关键类存在
             if [ -f "$WEBRTC_DIR/classes.jar" ]; then
-              EGL_CHECK=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
-              echo "[Step 2b]   EglBase: $EGL_CHECK"
+              LK_WC_CHECK=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "livekit/org/webrtc/PeerConnectionFactory" || echo "NOT_FOUND")
+              echo "[Step 2b]   livekit.org.webrtc.PeerConnectionFactory: $LK_WC_CHECK"
+              STD_WC_CHECK=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
+              echo "[Step 2b]   org.webrtc.EglBase: $STD_WC_CHECK"
               WC_COUNT=$(unzip -l "$WEBRTC_DIR/classes.jar" 2>/dev/null | grep "\.class$" | wc -l)
-              echo "[Step 2b]   WebRTC classes: $WC_COUNT"
+              echo "[Step 2b]   Total classes: $WC_COUNT"
+              
+              # 严重警告: 如果没有 livekit.org.webrtc 类，运行时会崩溃!
+              if echo "$LK_WC_CHECK" | grep -q "NOT_FOUND"; then
+                echo "[Step 2b] ⚠️ WARNING: No livekit.org.webrtc.* classes found!"
+                echo "[Step 2b]   This will cause runtime crash: NoClassDefFoundError"
+                echo "[Step 2b]   The app needs livekit.org.webrtc.PeerConnectionFactory\$InitializationOptions"
+              fi
             else
               echo "[Step 2b]   ⚠ No classes.jar in WebRTC AAR"
             fi
           else
-            echo "[Step 2b] ⚠ WebRTC AAR not found, video may not work"
+            echo "[Step 2b] ✗ FATAL: WebRTC AAR not found at all!"
+            echo "[Step 2b]   The app WILL crash with NoClassDefFoundError on LiveKit.init()"
+            # 不退出，继续尝试从 deps-runtime.txt 合并
           fi
 
           # ---- Step 3: 合并全部 classes.jar (True Fat AAR) ----
@@ -324,11 +351,54 @@ jobs:
 
           # 打包最终 classes.jar
           CLASSES_OUT="$WORK/classes-fat.jar"
+          
+          # ---- 关键补充: 检查 livekit.org.webrtc 类是否存在 ----
+          LK_WRTC_MISSING="no"
+          if [ ! -d "$MERGED_CLASSES/livekit/org/webrtc" ] || [ -z "$(ls -A $MERGED_CLASSES/livekit/org/webrtc/ 2>/dev/null)" ]; then
+            echo ""
+            echo "  ⚠️ WARNING: livekit/org/webrtc/ not found in merged classes!"
+            echo "     尝试从 WebRTC AAR 补充..."
+            LK_WRTC_MISSING="yes"
+            
+            # 尝试从 Step 2b 提取的 WebRTC 补充
+            if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
+              unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+              echo "  ✓ Supplemented from WebRTC AAR ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
+            fi
+            
+            # 如果仍然缺失，暴力搜索 Gradle cache
+            if [ ! -d "$MERGED_CLASSES/livekit/org/webrtc" ] || [ -z "$(ls -A $MERGED_CLASSES/livekit/org/webrtc/ 2>/dev/null)" ]; then
+              echo "  仍然缺失，暴力搜索 Gradle cache..."
+              for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -200); do
+                if unzip -l "$wc" 2>/dev/null | grep -q "livekit/org/webrtc/PeerConnectionFactory"; then
+                  echo "    Found in: $(basename $wc)"
+                  TMP_SUP="$WORK/supplement-tmp"
+                  rm -rf "$TMP_SUP" && mkdir -p "$TMP_SUP"
+                  unzip -qo "$wc" -d "$TMP_SUP" 2>/dev/null || true
+                  if [ -f "$TMP_SUP/classes.jar" ] && [ -s "$TMP_SUP/classes.jar" ]; then
+                    unzip -qo "$TMP_SUP/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
+                    echo "  ✓ Supplemented from: $(basename $wc)"
+                    break
+                  fi
+                  rm -rf "$TMP_SUP"
+                fi
+              done
+            fi
+          fi
+          
           (cd "$MERGED_CLASSES" && \
             rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro 2>/dev/null; \
             jar cf "$CLASSES_OUT" . )
           CLASS_CNT=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
           echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1) ($CLASS_CNT classes)"
+          
+          # 最终检查
+          if [ -d "$MERGED_CLASSES/livekit/org/webrtc" ] && [ -n "$(ls -A $MERGED_CLASSES/livekit/org/webrtc/ 2>/dev/null)" ]; then
+            echo "  ✅ livekit.org.webrtc.* classes included"
+          else
+            echo "  ❌ CRITICAL: livekit.org.webrtc.* still missing after all attempts!"
+            echo "     The resulting AAR will crash at runtime!"
+          fi
 
           # ---- Step 4: 收集所有 .so 原生库 ----
           JNI_OUT="$WORK/jni"
@@ -406,17 +476,50 @@ jobs:
 
           (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
 
-          # ---- 验证 ----
+          # ---- 验证（含 livekit.org.webrtc 关键类）----
           echo ""
           echo "[Step 6] Verifying final AAR..."
+          
+          # 关键验证1: livekit.org.webrtc.PeerConnectionFactory (运行时必需!)
+          FINAL_LK_WRTC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/PeerConnectionFactory" || echo "NOT_FOUND")
+          echo "  [关键] livekit/org/webrtc/PeerConnectionFactory.class: $FINAL_LK_WRTC"
+          
+          # 关键验证2: PeerConnectionFactory$InitializationOptions (崩溃缺失的类!)
+          FINAL_INIT_OPTS=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/PeerConnectionFactory\$" || echo "NOT_FOUND")
+          echo "  [关键] livekit/org/webrtc/PeerConnectionFactory\$*.class: $FINAL_INIT_OPTS"
+          
+          # 验证3: 标准 WebRTC EglBase
           FINAL_EGL=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
           echo "  org/webrtc/EglBase.class: $FINAL_EGL"
+          
+          # 统计信息
           FINAL_LK=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "io/livekit/" | wc -l)
           echo "  io.livekit/* entries: $FINAL_LK"
           FINAL_WC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/" | wc -l)
           echo "  org.webrtc/* entries: $FINAL_WC"
+          FINAL_LK_WC_CNT=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/" | wc -l)
+          echo "  livekit.org.webrtc/* entries: $FINAL_LK_WC_CNT"
           FINAL_SO=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "\.so$" | wc -l)
           echo "  .so files: $FINAL_SO"
+
+          # 致命检查: 如果缺少 livekit.org.webrtc.PeerConnectionFactory，AAR 无法使用!
+          if echo "$FINAL_LK_WRTC" | grep -q "NOT_FOUND"; then
+            echo ""
+            echo "=========================================="
+            echo "  ❌ FATAL: 缺少 livekit.org.webrtc.PeerConnectionFactory!"
+            echo "  运行时会报错:"
+            echo "    NoClassDefFoundError: Failed resolution of:"
+            echo "    Llivekit/org/webrtc/PeerConnectionFactory\$InitializationOptions;"
+            echo ""
+            echo "  请检查:"
+            echo "    1. livekit-android-webrtc / android-prefixed 依赖是否正确下载"
+            echo "    2. Step 3 合并依赖时是否被错误跳过"
+            echo "=========================================="
+            exit 1
+          fi
+          
+          echo ""
+          echo "  ✅ 关键类验证通过 (livekit.org.webrtc.PeerConnectionFactory 存在)"
 
           FAT_SIZE=$(du -h "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | cut -f1)
           CLS_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
