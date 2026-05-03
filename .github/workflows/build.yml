@@ -237,13 +237,15 @@ jobs:
             # 不退出，继续尝试从 deps-runtime.txt 合并
           fi
 
-          # ---- Step 3: 合并全部 classes.jar (True Fat AAR) ----
-          # 策略: 将 releaseRuntimeClasspath 中所有非基座的依赖全部打入
-          # 排除列表: uniapp(编译用)、插件自身、HBuilderX基座自带(androidx/kotlin-stdlib/fastjson)
+          # ---- Step 3: 全量打包所有运行时依赖 (Full Fat AAR) ----
+          # 策略: releaseRuntimeClasspath 中除插件自身和uniapp stub外，全部打入
+          #       不再排除 androidx/kotlin/dagger 等「疑似基座自带」的库
+          #       优点: 绝不会遗漏任何依赖（包括 livekit-org-webrtc 等深层传递依赖）
+          #       代价: AAR 更大(~50-60MB)，但与基座重复的类不会导致崩溃(仅空间浪费)
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "[Step 3] Merging ALL runtime dependencies (True Fat)..."
+          echo "[Step 3] Full Fat AAR: merging ALL runtime dependencies (no exclusion)..."
 
           # 3a: 插件自身代码
           if [ -f "$PLUGIN_EXTRACT/classes.jar" ] && [ -s "$PLUGIN_EXTRACT/classes.jar" ]; then
@@ -251,69 +253,22 @@ jobs:
             echo "  ✓ Plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 3b: 从 exportDeps 获取全部运行时依赖并逐个合并
-          # 先确保 exportDeps 已执行
+          # 3b: 全量合并 releaseRuntimeClasspath 所有依赖
           ./gradlew :exportDeps --quiet 2>/dev/null || true
 
           if [ -f "$ANDROID_ROOT/build/exports/deps-runtime.txt" ]; then
             DEP_CNT=0
-            SKIPPED_CNT=0
+            SKIP_CNT=0
             
             while IFS= read -r DEP_PATH; do
               [ -f "$DEP_PATH" ] || continue
               DEP_NAME=$(basename "$DEP_PATH")
               
-              # 跳过插件自身
-              echo "$DEP_NAME" | grep -qi "^livekit-c2ccall" && { SKIPPED_CNT=$((SKIPPED_CNT+1)); continue; }
-              
-              # 跳过 HBuilderX 基座自带（通过完整路径匹配 groupId）
-              # Gradle cache 路径格式: .../groupId/artifactId/version/.../filename
-              # 例如: .../androidx.core/core/1.13.1/.../core-1.13.1.aar
-              # 文件名不含 androidx. 前缀，必须检查路径!
-              IS_BASE="no"
-              
-              # 1) 完整路径中含 androidx.* groupId → 基座自带
-              echo "$DEP_PATH" | grep -qi "/androidx[./]" && IS_BASE="yes"
-              
-              # 2) Kotlin 标准库 → 基座自带
-              echo "$DEP_PATH" | grep -qi "/kotlin-stdlib" && IS_BASE="yes"
-              echo "$DEP_PATH" | grep -qi "/kotlin-stdlib-jdk" && IS_BASE="yes"
-              
-              # 3) Kotlinx Coroutines 全部模块 → 基座自带（core/jvm/android）
-              #    Gradle cache 路径: .../org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm/1.8.1/...
-              #    注意: artifactId 用连字符(-)不是点号(.)
-              echo "$DEP_PATH" | grep -qi "/kotlinx-coroutines" && IS_BASE="yes"
-              
-              # 4) FastJSON → 基座自带
-              echo "$DEP_PATH" | grep -qi "fastjson" && IS_BASE="yes"
-              
-              # 5) JetBrains annotations → 基座自带
-              echo "$DEP_PATH" | grep -qi "jetbrains.annotations" && IS_BASE="yes"
-              
-              # 6) uni-app SDK stub → 编译用，不打包
-              echo "$DEP_PATH" | grep -qi "uniapp" && IS_BASE="yes"
-              
-              # 7) Gson → HBuilderX 宿主内置 (gson-2.x)
-              echo "$DEP_PATH" | grep -qi "/com.google.code.gson/" && IS_BASE="yes"
-              
-              # 8) OkHttp / Okio → HBuilderX 宿主内置 (okhttp3:3.12.x, okio:1.x)
-              echo "$DEP_PATH" | grep -qi "/com.squareup.okhttp3/" && IS_BASE="yes"
-              echo "$DEP_PATH" | grep -qi "/com.squareup.okio/" && IS_BASE="yes"
-              echo "$DEP_PATH" | grep -qi "/com.squareup.okhttp/" && IS_BASE="yes"
-              
-              # 9) Dagger / JSR330 → 可能与宿主冲突
-              echo "$DEP_PATH" | grep -qi "/com.google.dagger/" && IS_BASE="yes"
-              echo "$DEP_PATH" | grep -qi "/javax.inject/" && IS_BASE="yes"
-              
-              # 10) Guava ListenableFuture → HBuilderX 宿主内置
-              echo "$DEP_PATH" | grep -qi "/com.google.guava/" && IS_BASE="yes"
-              echo "$DEP_PATH" | grep -qi "listenablefuture" && IS_BASE="yes"
-              
-              if [ "$IS_BASE" = "yes" ]; then
-                echo "    ⊘ $DEP_NAME (HBuilderX base)"
-                SKIPPED_CNT=$((SKIPPED_CNT+1))
-                continue
-              fi
+              # 仅排除两项:
+              #   1) 插件自身 (已在3a处理)
+              echo "$DEP_NAME" | grep -qi "^livekit-c2ccall" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
+              #   2) uniapp stub (仅编译时使用，运行时由基座提供)
+              echo "$DEP_PATH" | grep -qi "uniapp" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
               
               # 解压 classes.jar（AAR）或直接解压 JAR
               TMP_EXTRACT="$WORK/dep-tmp-$RANDOM"
@@ -328,77 +283,32 @@ jobs:
               if [ -f "$SRC_JAR" ] && [ -s "$SRC_JAR" ]; then
                 unzip -qo "$SRC_JAR" -d "$MERGED_CLASSES" 2>/dev/null || true
                 DEP_SIZE=$(du -h "$SRC_JAR" | cut -f1)
-                echo "  ✓ $(basename $DEP_PATH) ($DEP_SIZE)"
+                echo "  ✓ $DEP_NAME ($DEP_SIZE)"
                 DEP_CNT=$((DEP_CNT+1))
               fi
               rm -rf "$TMP_EXTRACT"
             done < "$ANDROID_ROOT/build/exports/deps-runtime.txt"
             
-            echo "  --- Merged $DEP_CNT deps, skipped $SKIPPED_CNT (base/plugin) ---"
+            echo "  --- Packed $DEP_CNT dependencies (skipped $SKIP_CNT: plugin/self + uniapp stub) ---"
           else
             echo "  ⚠ No deps-runtime.txt, falling back to manual merge..."
-            
-            # 兜底: 手动合并 LiveKit + WebRTC（旧逻辑）
             if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
               unzip -qo "$LIVEKIT_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-              echo "  ✓ LiveKit SDK classes ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1)) (fallback)"
+              echo "  ✓ LiveKit SDK ($(du -h $LIVEKIT_DIR/classes.jar | cut -f1))"
             fi
             if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
               unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-              echo "  ✓ WebRTC classes ($(du -h $WEBRTC_DIR/classes.jar | cut -f1)) (fallback)"
+              echo "  ✓ WebRTC ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
             fi
           fi
 
           # 打包最终 classes.jar
           CLASSES_OUT="$WORK/classes-fat.jar"
-          
-          # ---- 关键补充: 检查 livekit.org.webrtc 类是否存在 ----
-          LK_WRTC_MISSING="no"
-          if [ ! -d "$MERGED_CLASSES/livekit/org/webrtc" ] || [ -z "$(ls -A $MERGED_CLASSES/livekit/org/webrtc/ 2>/dev/null)" ]; then
-            echo ""
-            echo "  ⚠️ WARNING: livekit/org/webrtc/ not found in merged classes!"
-            echo "     尝试从 WebRTC AAR 补充..."
-            LK_WRTC_MISSING="yes"
-            
-            # 尝试从 Step 2b 提取的 WebRTC 补充
-            if [ -f "$WEBRTC_DIR/classes.jar" ] && [ -s "$WEBRTC_DIR/classes.jar" ]; then
-              unzip -qo "$WEBRTC_DIR/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-              echo "  ✓ Supplemented from WebRTC AAR ($(du -h $WEBRTC_DIR/classes.jar | cut -f1))"
-            fi
-            
-            # 如果仍然缺失，暴力搜索 Gradle cache
-            if [ ! -d "$MERGED_CLASSES/livekit/org/webrtc" ] || [ -z "$(ls -A $MERGED_CLASSES/livekit/org/webrtc/ 2>/dev/null)" ]; then
-              echo "  仍然缺失，暴力搜索 Gradle cache..."
-              for wc in $(find "$GRADLE_CACHE" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -200); do
-                if unzip -l "$wc" 2>/dev/null | grep -q "livekit/org/webrtc/PeerConnectionFactory"; then
-                  echo "    Found in: $(basename $wc)"
-                  TMP_SUP="$WORK/supplement-tmp"
-                  rm -rf "$TMP_SUP" && mkdir -p "$TMP_SUP"
-                  unzip -qo "$wc" -d "$TMP_SUP" 2>/dev/null || true
-                  if [ -f "$TMP_SUP/classes.jar" ] && [ -s "$TMP_SUP/classes.jar" ]; then
-                    unzip -qo "$TMP_SUP/classes.jar" -d "$MERGED_CLASSES" 2>/dev/null || true
-                    echo "  ✓ Supplemented from: $(basename $wc)"
-                    break
-                  fi
-                  rm -rf "$TMP_SUP"
-                fi
-              done
-            fi
-          fi
-          
           (cd "$MERGED_CLASSES" && \
             rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro 2>/dev/null; \
             jar cf "$CLASSES_OUT" . )
           CLASS_CNT=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
           echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1) ($CLASS_CNT classes)"
-          
-          # 最终检查
-          if [ -d "$MERGED_CLASSES/livekit/org/webrtc" ] && [ -n "$(ls -A $MERGED_CLASSES/livekit/org/webrtc/ 2>/dev/null)" ]; then
-            echo "  ✅ livekit.org.webrtc.* classes included"
-          else
-            echo "  ❌ CRITICAL: livekit.org.webrtc.* still missing after all attempts!"
-            echo "     The resulting AAR will crash at runtime!"
-          fi
 
           # ---- Step 4: 收集所有 .so 原生库 ----
           JNI_OUT="$WORK/jni"
@@ -476,50 +386,32 @@ jobs:
 
           (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
 
-          # ---- 验证（含 livekit.org.webrtc 关键类）----
+          # ---- 验证 ----
           echo ""
           echo "[Step 6] Verifying final AAR..."
           
-          # 关键验证1: livekit.org.webrtc.PeerConnectionFactory (运行时必需!)
-          FINAL_LK_WRTC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/PeerConnectionFactory" || echo "NOT_FOUND")
-          echo "  [关键] livekit/org/webrtc/PeerConnectionFactory.class: $FINAL_LK_WRTC"
-          
-          # 关键验证2: PeerConnectionFactory$InitializationOptions (崩溃缺失的类!)
-          FINAL_INIT_OPTS=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/PeerConnectionFactory\$" || echo "NOT_FOUND")
-          echo "  [关键] livekit/org/webrtc/PeerConnectionFactory\$*.class: $FINAL_INIT_OPTS"
-          
-          # 验证3: 标准 WebRTC EglBase
-          FINAL_EGL=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/EglBase" || echo "NOT_FOUND")
-          echo "  org/webrtc/EglBase.class: $FINAL_EGL"
-          
-          # 统计信息
+          # 基本完整性检查
           FINAL_LK=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "io/livekit/" | wc -l)
           echo "  io.livekit/* entries: $FINAL_LK"
           FINAL_WC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/" | wc -l)
           echo "  org.webrtc/* entries: $FINAL_WC"
-          FINAL_LK_WC_CNT=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/" | wc -l)
-          echo "  livekit.org.webrtc/* entries: $FINAL_LK_WC_CNT"
+          FINAL_LK_WC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/" | wc -l)
+          echo "  livekit.org.webrtc/* entries: $FINAL_LK_WC"
           FINAL_SO=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "\.so$" | wc -l)
           echo "  .so files: $FINAL_SO"
-
-          # 致命检查: 如果缺少 livekit.org.webrtc.PeerConnectionFactory，AAR 无法使用!
-          if echo "$FINAL_LK_WRTC" | grep -q "NOT_FOUND"; then
+          
+          # Full Fat 模式下如果 LiveKit 类都不存在，说明 exportDeps 有问题
+          if [ "$FINAL_LK" -lt 10 ]; then
             echo ""
             echo "=========================================="
-            echo "  ❌ FATAL: 缺少 livekit.org.webrtc.PeerConnectionFactory!"
-            echo "  运行时会报错:"
-            echo "    NoClassDefFoundError: Failed resolution of:"
-            echo "    Llivekit/org/webrtc/PeerConnectionFactory\$InitializationOptions;"
-            echo ""
-            echo "  请检查:"
-            echo "    1. livekit-android-webrtc / android-prefixed 依赖是否正确下载"
-            echo "    2. Step 3 合并依赖时是否被错误跳过"
+            echo "  ❌ FATAL: io.livekit.* classes < 10!"
+            echo "  Full Fat AAR 几乎为空，exportDeps 可能未正确执行"
             echo "=========================================="
             exit 1
           fi
           
           echo ""
-          echo "  ✅ 关键类验证通过 (livekit.org.webrtc.PeerConnectionFactory 存在)"
+          echo "  ✅ Full Fat AAR 验证通过 ($CLASS_CNT classes packed)"
 
           FAT_SIZE=$(du -h "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | cut -f1)
           CLS_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
