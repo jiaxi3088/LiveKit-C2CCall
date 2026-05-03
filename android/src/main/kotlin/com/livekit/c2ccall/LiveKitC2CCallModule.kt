@@ -577,30 +577,45 @@ class LiveKitC2CCallModule : UniModule() {
         Log.d(TAG, "[DEBUG] 步骤7a: EglBase check done")
 
         // 7b. 发布本地摄像头 + 麦克风轨道
-        Log.d(TAG, "[DEBUG] 步骤7b: 准备启动 setCameraEnabled 子协程...")
-        scope.launch {
+        // ⚠️ 重要: 摄像头/麦克风操作必须在 IO 线程执行！
+        //    在 Main 线程调用 WebRTC Native 方法可能触发 SIGSEGV
+        Log.d(TAG, "[DEBUG] 步骤7b: 准备启动 setCameraEnabled 子协程 (IO线程)...")
+        scope.launch(Dispatchers.IO) {
             try {
-                val local = r.localParticipant
-                Log.d(TAG, "[DEBUG] 步骤7b-1: localParticipant 获取成功, identity=${local.identity}")
+                // 延迟 500ms 让 Room 连接完全稳定
+                kotlinx.coroutines.delay(500)
+                Log.d(TAG, "[DEBUG] 步骤7b-1: localParticipant 获取成功, identity=${r.localParticipant.identity}")
+                
+                // 打印当前线程信息用于诊断
+                Log.d(TAG, "[DEBUG] 步骤7b-1b: 当前线程=${Thread.currentThread().name}, isDaemon=${Thread.currentThread().isDaemon}")
+                
                 Log.d(TAG, "[DEBUG] 步骤7b-2: 即将调用 local.setCameraEnabled(true)...")
                 
                 // 根据用户传入的视频选项决定是否开启摄像头（默认开启）
-                local.setCameraEnabled(true)
+                r.localParticipant.setCameraEnabled(true)
                 Log.d(TAG, "[DEBUG] 步骤7b-3: ✅ setCameraEnabled(true) 成功返回!")
                 
                 Log.d(TAG, "[DEBUG] 步骤7c-1: 即将调用 local.setMicrophoneEnabled($isAudioEnabled)...")
-                local.setMicrophoneEnabled(isAudioEnabled)
+                r.localParticipant.setMicrophoneEnabled(isAudioEnabled)
                 Log.d(TAG, "[DEBUG] 步骤7c-2: ✅ setMicrophoneEnabled 成功返回! (enabled=$isAudioEnabled)")
             } catch (e: Exception) {
-                Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败: ${e.javaClass.simpleName}: ${e.message}", e)
-                sendEvent("onError", "发布本地媒体失败: ${e.javaClass.simpleName} - ${e.message}")
+                Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败 (Exception): ${e.javaClass.simpleName}: ${e.message}", e)
+                // 切回主线程发送事件
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    sendEvent("onError", "发布本地媒体失败: ${e.javaClass.simpleName} - ${e.message}")
+                }
             } catch (e: Throwable) {
-                // 捕获包括 Error 在内的所有Throwable（如 UnsatisfiedLinkError, SIGSEGV 等）
-                Log.e(TAG, "[DEBUG] 💥💥💥 Native Crash 或严重错误: ${e.javaClass.simpleName}: ${e.message}", e)
-                sendEvent("onError", "Native 崩溃: ${e.javaClass.simpleName} - ${e.message}")
+                // 捕获包括 Error 在内的所有Throwable（如 UnsatisfiedLinkError 等）
+                // 注意: SIGSEGV/SIGABRT 等 Native Signal 无法被 Java 层捕获
+                Log.e(TAG, "[DEBUG] 💥💥💥 Native Crash 或严重错误 (Throwable): ${e.javaClass.simpleName}: ${e.message}", e)
+                try {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        sendEvent("onError", "Native 崩溃: ${e.javaClass.simpleName} - ${e.message}")
+                    } catch (_: Exception) {}
+                } catch (_: Exception) {}
             }
         }
-        Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（异步执行）")
+        Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（IO线程异步执行）")
 
         // 7c. 订阅已存在的远端参与者媒体轨道
         Log.d(TAG, "[DEBUG] 步骤7d: 订阅远端参与者...")
