@@ -123,7 +123,7 @@ class LiveKitC2CCallModule : UniModule() {
                 Log.d(TAG, "[DEBUG] 步骤6完成: room.connect 成功")
 
                 // ===== 步骤7: 初始化视频渲染 + 发布本地媒体 + 订阅远端媒体 =====
-                Log.d(TAG, "[DEBUG] 步骤6完成后的状态检查: room=$room, room.isActive=${room?.isActive}")
+                Log.d(TAG, "[DEBUG] 步骤6完成后的状态检查: room=$room")
                 initMediaAfterConnect()
                 
                 Log.d(TAG, "[DEBUG] 即将调用 invokeSuccess...")
