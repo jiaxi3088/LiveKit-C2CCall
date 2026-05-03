@@ -252,8 +252,8 @@ jobs:
               echo "$DEP_PATH" | grep -qi "/kotlin-stdlib" && IS_BASE="yes"
               echo "$DEP_PATH" | grep -qi "/kotlin-stdlib-jdk" && IS_BASE="yes"
               
-              # 3) Kotlinx Coroutines 核心 → 基座自带（但保留 serialization/json 等非核心）
-              echo "$DEP_PATH" | grep -qi "/kotlinx.coroutines/kotlinx-coroutines-core" && IS_BASE="yes"
+              # 3) Kotlinx Coroutines 全部模块 → 基座自带（core/jvm/android）
+              echo "$DEP_PATH" | grep -qi "/kotlinx.coroutines/" && IS_BASE="yes"
               
               # 4) FastJSON → 基座自带
               echo "$DEP_PATH" | grep -qi "fastjson" && IS_BASE="yes"
@@ -263,6 +263,22 @@ jobs:
               
               # 6) uni-app SDK stub → 编译用，不打包
               echo "$DEP_PATH" | grep -qi "uniapp" && IS_BASE="yes"
+              
+              # 7) Gson → HBuilderX 宿主内置 (gson-2.x)
+              echo "$DEP_PATH" | grep -qi "/com.google.code.gson/" && IS_BASE="yes"
+              
+              # 8) OkHttp / Okio → HBuilderX 宿主内置 (okhttp3:3.12.x, okio:1.x)
+              echo "$DEP_PATH" | grep -qi "/com.squareup.okhttp3/" && IS_BASE="yes"
+              echo "$DEP_PATH" | grep -qi "/com.squareup.okio/" && IS_BASE="yes"
+              echo "$DEP_PATH" | grep -qi "/com.squareup.okhttp/" && IS_BASE="yes"
+              
+              # 9) Dagger / JSR330 → 可能与宿主冲突
+              echo "$DEP_PATH" | grep -qi "/com.google.dagger/" && IS_BASE="yes"
+              echo "$DEP_PATH" | grep -qi "/javax.inject/" && IS_BASE="yes"
+              
+              # 10) Guava ListenableFuture → HBuilderX 宿主内置
+              echo "$DEP_PATH" | grep -qi "/com.google.guava/" && IS_BASE="yes"
+              echo "$DEP_PATH" | grep -qi "listenablefuture" && IS_BASE="yes"
               
               if [ "$IS_BASE" = "yes" ]; then
                 echo "    ⊘ $DEP_NAME (HBuilderX base)"
