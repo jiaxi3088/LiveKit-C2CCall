@@ -600,19 +600,13 @@ class LiveKitC2CCallModule : UniModule() {
                 Log.d(TAG, "[DEBUG] 步骤7c-2: ✅ setMicrophoneEnabled 成功返回! (enabled=$isAudioEnabled)")
             } catch (e: Exception) {
                 Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败 (Exception): ${e.javaClass.simpleName}: ${e.message}", e)
-                // 切回主线程发送事件
-                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    sendEvent("onError", "发布本地媒体失败: ${e.javaClass.simpleName} - ${e.message}")
-                }
+                // 切回主线程发送事件（忽略异常）
+                try { kotlinx.coroutines.withContext(Dispatchers.Main) { sendEvent("onError", "发布本地媒体失败: ${e.javaClass.simpleName} - ${e.message}") } } catch (_: Exception) {}
             } catch (e: Throwable) {
                 // 捕获包括 Error 在内的所有Throwable（如 UnsatisfiedLinkError 等）
                 // 注意: SIGSEGV/SIGABRT 等 Native Signal 无法被 Java 层捕获
                 Log.e(TAG, "[DEBUG] 💥💥💥 Native Crash 或严重错误 (Throwable): ${e.javaClass.simpleName}: ${e.message}", e)
-                try {
-                    kotlinx.coroutines.withContext(Dispatchers.Main) {
-                        sendEvent("onError", "Native 崩溃: ${e.javaClass.simpleName} - ${e.message}")
-                    } catch (_: Exception) {}
-                } catch (_: Exception) {}
+                try { kotlinx.coroutines.withContext(Dispatchers.Main) { sendEvent("onError", "Native 崩溃: ${e.javaClass.simpleName} - ${e.message}") } } catch (_: Exception) {}
             }
         }
         Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（IO线程异步执行）")
