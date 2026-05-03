@@ -45,6 +45,10 @@ dependencies {
     // WebRTC 由 livekit-android 传递引入，无需显式声明
     implementation 'io.livekit:livekit-android:2.25.1'
 
+    // 协程是插件源码直接使用的编译期 API；运行时仍由 LiveKit 传递依赖进入 Semi-Fat AAR
+    compileOnly 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3'
+    compileOnly 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
     // AndroidX 不在插件源码中直接使用，由 package.json 交给 HBuilderX 云打包按需引入，避免打入 AAR 后重复类/体积过大
 
     // uni-app SDK（仅编译用）
