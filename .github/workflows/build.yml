@@ -473,8 +473,16 @@ jobs:
           # 用 zip 替代 jar cf 创建 JAR (避免 JDK 模块校验错误:
           # "Package xxx missing from ModulePackages class file attribute")
           # JAR 本质就是 ZIP 格式
+          # v7.3: 额外清除 *.version 资源文件 (AndroidX 版本标记)
+          #       这些文件会导致 mergeReleaseJavaResource 阶段报:
+          #       "DuplicateRelativeFileException: 2 files found with path 
+          #        META-INF/androidx.*.version"
+          #       因为 HBuilderX 基座也包含同名 .version 文件
           (cd "$MERGED_CLASSES" && \
-            rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro META-INF/module-info.class META-INF/versions 2>/dev/null; \
+            rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF \
+                   META-INF/*.pro META-INF/module-info.class META-INF/versions \
+                   META-INF/*.version META-INF/LICENSE* META-INF/NOTICE* \
+                   META-INF/dependencies META-INF/*.kotlin_module 2>/dev/null; \
             zip -q -r "$CLASSES_OUT" . )
           CLASS_CNT=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
           echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1) ($CLASS_CNT classes)"
@@ -608,7 +616,7 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "  Full Fat AAR 构建完成! (v7.2 补充 _COROUTINE 前缀)"
+          echo "  Full Fat AAR 构建完成! (v7.3 清除 META-INF 资源冲突)"
           echo "  文件:    livekit-c2c-fat.aar"
           echo "  总大小:  $FAT_SIZE"
           echo "  其中:"
