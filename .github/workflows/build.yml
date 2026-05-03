@@ -320,8 +320,17 @@ jobs:
             echo "  ✓ Plugin code ($(du -h $PLUGIN_EXTRACT/classes.jar | cut -f1))"
           fi
 
-          # 3b: 合并 releaseRuntimeClasspath 所有依赖 (先全部合入)
-          echo "[Step 3b] Merging ALL runtime dependencies..."
+          # 3b: 合并 releaseRuntimeClasspath 必要运行时依赖
+          echo "[Step 3b] Merging required runtime dependencies..."
+
+          should_skip_embedded_classes_dep() {
+            case "$1" in
+              appcompat-*.aar|appcompat-resources-*.aar|fragment-*.aar|activity-*.aar|drawerlayout-*.aar|emoji2-*.aar|emoji2-views-helper-*.aar|vectordrawable-*.aar|vectordrawable-animated-*.aar|viewpager-*.aar|customview-*.aar|loader-*.aar|cursoradapter-*.aar|interpolator-*.aar|versionedparcelable-*.aar|profileinstaller-*.aar|startup-runtime-*.aar|tracing-*.aar|savedstate-*.aar|core-*.aar|core-ktx-*.aar|core-common-*.jar|core-runtime-*.aar|lifecycle-*.aar|lifecycle-*.jar|annotation-*.jar|annotation-jvm-*.jar|annotation-experimental-*.aar|resourceinspection-annotation-*.jar|collection-*.jar|concurrent-futures-*.jar|listenablefuture-*.jar)
+                return 0
+                ;;
+            esac
+            return 1
+          }
           
           ./gradlew :exportDeps --quiet 2>/dev/null || true
 
@@ -333,9 +342,14 @@ jobs:
               [ -f "$DEP_PATH" ] || continue
               DEP_NAME=$(basename "$DEP_PATH")
               
-              # 仅跳过插件自身和 uniapp stub
+              # 跳过插件自身、uniapp stub，以及交给 HBuilderX/package.json 处理的 AndroidX 依赖
               echo "$DEP_NAME" | grep -qi "^livekit-c2ccall" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
               echo "$DEP_PATH" | grep -qi "uniapp" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
+              if should_skip_embedded_classes_dep "$DEP_NAME"; then
+                echo "  - external $DEP_NAME (provided by HBuilderX/package.json)"
+                SKIP_CNT=$((SKIP_CNT+1))
+                continue
+              fi
               
               # 解压 classes.jar（AAR）或直接解压 JAR
               TMP_EXTRACT="$WORK/dep-tmp-$RANDOM"
@@ -520,12 +534,15 @@ jobs:
             done < "$ANDROID_ROOT/build/exports/deps-runtime.txt"
           fi
 
+          # UniApp 云打包只声明 armeabi-v7a + arm64-v8a，删除模拟器 ABI，显著降低 AAR 体积
+          find "$JNI_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "armeabi-v7a" ! -name "arm64-v8a" -exec rm -rf {} + 2>/dev/null || true
+
           SO_COUNT=$(find "$JNI_DIR" -name "*.so" 2>/dev/null | wc -l)
           echo "  Total .so files: $SO_COUNT"
 
           if [ "$SO_COUNT" -gt 0 ]; then
             echo "  Architectures:"
-            find "$JNI_DIR" -maxdepth 1 -type d ! -name "." | while read arch; do
+            find "$JNI_DIR" -mindepth 1 -maxdepth 1 -type d | while read arch; do
               scnt=$(find "$arch" -name "*.so" 2>/dev/null | wc -l)
               ssize=$(du -sh "$arch" 2>/dev/null | cut -f1)
               [ "$scnt" -gt 0 ] && echo "    $(basename $arch)/ ($scnt files, $ssize)"

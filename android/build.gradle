@@ -41,21 +41,18 @@ android {
 }
 
 dependencies {
-    // LiveKit Android SDK + 所有依赖 — CI 中用 Shell 脚本打入 AAR（Fat AAR）
-    // WebRTC (org.webrtc.*) 由 livekit-android 传递引入，无需显式声明
+    // LiveKit Android SDK + 传递依赖 — CI 中按白名单打入 AAR（Semi-Fat AAR）
+    // WebRTC 由 livekit-android 传递引入，无需显式声明
     implementation 'io.livekit:livekit-android:2.25.1'
-    
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.core:core-ktx:1.13.1'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
-    implementation 'androidx.lifecycle:lifecycle-common:2.8.7'
+
+    // AndroidX 不在插件源码中直接使用，由 package.json 交给 HBuilderX 云打包按需引入，避免打入 AAR 后重复类/体积过大
 
     // uni-app SDK（仅编译用）
     compileOnly fileTree(dir: '../libs', include: ['uniapp-v8-release.aar'])
 }
 
-// Full Fat AAR 方案: CI 中将 LiveKit SDK + WebRTC + 所有依赖打入最终 AAR
-// 产物为 Full Fat AAR (~30-40MB)，HBuilderX 云打包时无需任何 Maven 依赖解析
+// Semi-Fat AAR 方案: CI 中只打入 LiveKit/WebRTC/Kotlin/序列化等必要运行时，AndroidX 交给 HBuilderX 处理
+// 产物应明显小于 Full Fat AAR，降低 HBuilderX 云打包“未知错误”和重复类风险
 
 // 导出运行时依赖（含传递依赖）供 Semi-Fat AAR 脚本使用
 task exportDeps {
