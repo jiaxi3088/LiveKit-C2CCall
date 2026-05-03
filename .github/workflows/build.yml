@@ -945,16 +945,6 @@ jobs:
 
             > 解压后目录结构：`LiveKit-C2CCall/android/livekit-c2c.aar` + `LiveKit-C2CCall/ios/LiveKitC2CCall.framework`
           files: LiveKit-C2CCall-v1.0.0.zip
-            **触发**: ${{ github.event_name }}
-
-            ### 下载说明
-
-            | 文件 | 说明 |
-            |------|------|
-            `${{ env.ZIP_NAME }}` | 完整插件包（含 Android + iOS），解压后放入 UniApp 项目 `nativeplugins/` 目录即可 |
-
-            > 解压后目录结构：`LiveKit-C2CCall/android/livekit-c2c.aar` + `LiveKit-C2CCall/ios/LiveKitC2CCall.framework`
-          files: ${{ env.ZIP_NAME }}
           draft: false
           prerelease: false
         env:
