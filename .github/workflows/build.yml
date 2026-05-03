@@ -253,7 +253,9 @@ jobs:
               echo "$DEP_PATH" | grep -qi "/kotlin-stdlib-jdk" && IS_BASE="yes"
               
               # 3) Kotlinx Coroutines 全部模块 → 基座自带（core/jvm/android）
-              echo "$DEP_PATH" | grep -qi "/kotlinx.coroutines/" && IS_BASE="yes"
+              #    Gradle cache 路径: .../org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm/1.8.1/...
+              #    注意: artifactId 用连字符(-)不是点号(.)
+              echo "$DEP_PATH" | grep -qi "/kotlinx-coroutines" && IS_BASE="yes"
               
               # 4) FastJSON → 基座自带
               echo "$DEP_PATH" | grep -qi "fastjson" && IS_BASE="yes"
