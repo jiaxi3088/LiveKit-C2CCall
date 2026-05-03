@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.util.AttributeSet
 import android.util.Log
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.TextView
 import io.dcloud.feature.uniapp.annotation.UniComponentAnnotation
@@ -20,8 +21,9 @@ import io.dcloud.feature.uniapp.ui.component.UniComponent as UniComponentBase
  * 属性：
  *   - type: "local" | "remote"（默认 "remote"）
  *
- * 内部实现：通过反射创建 org.webrtc.SurfaceViewRenderer，避免编译期依赖 WebRTC 库。
- * 若 WebRTC 不可用，显示占位视图，不影响音频通话功能。
+ * ⚠️ 关键修复 (v1.0.1):
+ *    SurfaceViewRenderer 必须在 View attach 到 Window 后才能调用 init()，
+ *    否则 WebRTC Native 层访问无效 Surface 导致 SIGSEGV 崩溃！
  */
 @UniComponentAnnotation(props = ["type"])
 class LiveKitVideoView @JvmOverloads constructor(
@@ -46,7 +48,6 @@ class LiveKitVideoView @JvmOverloads constructor(
         fun isWebRtcAvailable(): Boolean {
             if (webrtcAvailable == null) {
                 webrtcAvailable = try {
-                    // LiveKit Android SDK 2.x 使用 repackaged WebRTC: livekit.org.webrtc.*
                     Class.forName("livekit.org.webrtc.EglBase")
                     Log.i(TAG, "WebRTC runtime check: AVAILABLE")
                     true
@@ -71,7 +72,7 @@ class LiveKitVideoView @JvmOverloads constructor(
                     val createMethod = eglBaseClass.getMethod("create")
                     sharedEglBase = createMethod.invoke(null)
                     Log.i(TAG, "Shared EglBase created via reflection")
-                } catch (e:Exception){
+                } catch (e: Exception) {
                     Log.e(TAG, "Failed to create EglBase: ${e.message}", e)
                     webrtcAvailable = false
                 }
@@ -104,11 +105,9 @@ class LiveKitVideoView @JvmOverloads constructor(
 
         /**
          * 通过反射创建 SurfaceViewRenderer 实例
-         * @return SurfaceViewRenderer 实例，失败时返回 null
          */
         fun createSurfaceViewRenderer(context: Context): Any? {
             return try {
-                // LiveKit Android SDK 2.x 使用 repackaged WebRTC: livekit.org.webrtc.*
                 val svrClass = Class.forName("livekit.org.webrtc.SurfaceViewRenderer")
                 val constructor = svrClass.getConstructor(Context::class.java)
                 constructor.newInstance(context)
@@ -120,7 +119,7 @@ class LiveKitVideoView @JvmOverloads constructor(
 
         /**
          * 初始化 SurfaceViewRenderer（init + scalingType + hardwareScaler）
-         * @return 是否初始化成功
+         * ⚠️ 只能在 View 已 attach 到 Window 后调用！
          */
         fun initSurfaceViewRenderer(renderer: Any?, context: Context): Boolean {
             if (renderer == null) return false
@@ -133,7 +132,6 @@ class LiveKitVideoView @JvmOverloads constructor(
                 val eglContext = eglContextField.get(eglBase)
 
                 // renderer.init(eglBase.eglBaseContext, null)
-                // LiveKit Android SDK 2.x 使用 repackaged WebRTC: livekit.org.webrtc.*
                 val rendererEventsClsName = "livekit.org.webrtc.RendererCommon\$RendererEvents"
                 val initMethod = renderer.javaClass.getMethod("init", eglContext.javaClass, Class.forName(rendererEventsClsName))
                 initMethod.invoke(renderer, eglContext, null)
@@ -149,7 +147,7 @@ class LiveKitVideoView @JvmOverloads constructor(
                 val setHwMethod = renderer.javaClass.getMethod("setEnableHardwareScaler", java.lang.Boolean.TYPE)
                 setHwMethod.invoke(renderer, true)
 
-                Log.d(TAG, "SurfaceViewRenderer initialized OK")
+                Log.d(TAG, "SurfaceViewRenderer initialized OK (safe mode)")
                 return true
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to init SurfaceViewRenderer: ${e.message}", e)
@@ -170,14 +168,18 @@ class LiveKitVideoView @JvmOverloads constructor(
         }
     }
 
-    /** 渲染器实例（实际是 org.webrtc.SurfaceViewRenderer，用 Any 类型持有以避免 import） */
+    /** 渲染器实例（实际是 org.webrtc.SurfaceViewRenderer） */
     private var renderer: Any? = null
     internal var viewType: String = "remote"
         private set
 
-    /** WebRTC 渲染器是否就绪（可用于绑定视频轨道） */
+    /** WebRTC 渲染器是否就绪 */
     var isRendererReady: Boolean = false
         private set
+
+    /** 是否已执行延迟初始化（防止重复） */
+    private var isDeferredInitScheduled = false
+    private var isDeferredInitDone = false
 
     init {
         val container = FrameLayout(context).apply {
@@ -188,31 +190,109 @@ class LiveKitVideoView @JvmOverloads constructor(
         }
 
         if (isWebRtcAvailable()) {
-            // 尝试通过反射创建 SurfaceViewRenderer 并初始化
+            // ✅ 安全策略：只创建渲染器，不立即 init！
+            // init() 必须等到 View attach 到 Window 后才能安全调用
             renderer = createSurfaceViewRenderer(context)
-            isRendererReady = initSurfaceViewRenderer(renderer, context)
-
-            if (isRendererReady && renderer != null) {
+            
+            if (renderer != null) {
                 val rendererView = renderer as View
                 rendererView.layoutParams = FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
                 )
                 container.addView(rendererView)
-                Log.d(TAG, "LiveKitVideoView init OK (WebRTC renderer ready)")
+                
+                // 标记需要延迟初始化
+                isDeferredInitScheduled = true
+                Log.d(TAG, "LiveKitVideoView init OK (renderer created, deferred init pending)")
             } else {
-                // WebRTC 可但渲染器创建/初始化失败 → 显示占位
                 renderer = null
-                addPlaceholderView(container, context, "Video init failed")
-                Log.w(TAG, "LiveKitVideoView init: renderer creation failed, using placeholder")
+                addPlaceholderView(container, context, "Renderer creation failed")
+                Log.w(TAG, "LiveKitVideoView init: renderer creation failed")
             }
         } else {
-            // WebRTC 不可用 → 显示占位视图（音频通话仍可用）
             addPlaceholderView(container, context, "WebRTC unavailable")
-            Log.w(TAG, "LiveKitVideoView init: WebRTC not available in runtime, video disabled (audio-only mode)")
+            Log.w(TAG, "LiveKitVideoView init: WebRTC not available")
         }
 
         setContainerView(container)
+    }
+
+    /**
+     * 安全延迟初始化：在 View 首次布局完成后调用 renderer.init()
+     * 这确保 Surface 已有效且 View 已 attach 到 Window
+     */
+    private fun performDeferredInitIfNeeded() {
+        if (isDeferredInitDone || !isDeferredInitScheduled || renderer == null) return
+        
+        try {
+            isRendererReady = initSurfaceViewRenderer(renderer, context)
+            isDeferredInitDone = true
+            
+            if (isRendererReady) {
+                Log.d(TAG, "✅ Deferred init SUCCESS for $viewType renderer (attached to window)")
+            } else {
+                Log.w(TAG, "⚠️ Deferred init FAILED for $viewType renderer")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Deferred init EXCEPTION for $viewType: ${e.message}", e)
+            isDeferredInitDone = true // 标记已尝试，避免重试
+        }
+    }
+
+    override fun onCreated() {
+        super.onCreated()
+        viewType = getAttr("type")?.toString() ?: "remote"
+
+        when (viewType) {
+            "local" -> localViewInstance = this
+            "remote" -> remoteViewInstance = this
+        }
+
+        // ✅ 在 onCreated 中注册延迟初始化回调
+        // 当 UniComponent 完成 layout 并 attach 到 Window 时触发
+        if (isDeferredInitScheduled && !isDeferredInitDone && renderer != null) {
+            val rendererView = renderer as View
+            
+            // 方案1: 使用 post 确保在下一个消息循环中执行
+            rendererView.post {
+                Log.d(TAG, "[DEFERRED] post callback fired for $viewType, attempting safe init...")
+                performDeferredInitIfNeeded()
+            }
+            
+            // 方案2: 备用方案 - 监听 GlobalLayout（确保 layout 完成）
+            rendererView.viewTreeObserver.addOnGlobalLayoutListener(object : 
+                ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    // 移除监听器防止多次触发
+                    try {
+                        rendererView.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    } catch (_: Exception) {}
+                    
+                    if (!isDeferredInitDone) {
+                        Log.d(TAG, "[DEFERRED] GlobalLayout triggered for $viewType, performing init...")
+                        performDeferredInitIfNeeded()
+                    }
+                }
+            })
+        }
+
+        Log.d(TAG, "onCreated: type=$viewType, deferredInitScheduled=$isDeferredInitScheduled, rendererReady=$isRendererReady")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+
+        when (viewType) {
+            "local" -> if (localViewInstance === this) localViewInstance = null
+            "remote" -> if (remoteViewInstance === this) remoteViewInstance = null
+        }
+
+        releaseSurfaceViewRenderer(renderer)
+        renderer = null
+        isRendererReady = false
+        isDeferredInitDone = true
+        Log.d(TAG, "onDestroy: type=$viewType")
     }
 
     /**
@@ -231,35 +311,9 @@ class LiveKitVideoView @JvmOverloads constructor(
         Log.d(TAG, "Placeholder view added: $reason")
     }
 
-    override fun onCreated() {
-        super.onCreated()
-        viewType = getAttr("type")?.toString() ?: "remote"
-
-        when (viewType) {
-            "local" -> localViewInstance = this
-            "remote" -> remoteViewInstance = this
-        }
-        Log.d(TAG, "onCreated: type=$viewType, rendererReady=$isRendererReady")
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-
-        when (viewType) {
-            "local" -> if (localViewInstance === this) localViewInstance = null
-            "remote" -> if (remoteViewInstance === this) remoteViewInstance = null
-        }
-
-        releaseSurfaceViewRenderer(renderer)
-        renderer = null
-        isRendererReady = false
-        Log.d(TAG, "onDestroy: type=$viewType")
-    }
-
     /**
      * 获取内部渲染器实例（org.webrtc.SurfaceViewRenderer，类型为 Any）
      * 用于 Module 通过反射调用 addSink/removeSink
-     * @return 渲染器实例，未就绪时返回 null
      */
     fun getRenderer(): Any? = if (isRendererReady) renderer else null
 
