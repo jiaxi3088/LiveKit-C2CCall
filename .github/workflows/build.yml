@@ -95,15 +95,39 @@ jobs:
         run: |
           set -e
 
-          # ====== Full Fat AAR: 全部依赖自包含 v6 ======
+          # ====== Full Fat AAR: 全部依赖自包含 v7 ======
           # 不再依赖 HBuilderX 解析 Maven 依赖
           # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + arm64 .so
-          # 预期大小: ~20-25MB (v6: 物理剥离 HBuilderX 基座包，100% 无冲突)
-          # v6 核心变更:
-          #   先全量合并所有依赖，然后从合并后的 class 目录中 rm -rf 删除
-          #   HBuilderX 基座已有的包 (解决 Duplicate class 构建错误):
-          #     kotlinx.coroutines, okhttp3, okio, org.jetbrains.annotations,
-          #     kotlin/*, androidx.(annotation|core|activity|fragment|lifecycle)
+          # 预期大小: ~15-20MB (v7: 广泛前缀黑名单，彻底杜绝 Duplicate class)
+          # 
+          # ═════════════════════════════════════════════════════
+          # v7 核心变更: 广泛前缀黑名单 (Prefix-based Blacklist)
+          # ═════════════════════════════════════════════════════
+          # 不再逐个列举子包(永远会漏)，改为按顶级前缀删除整个通用库家族:
+          #
+          #   前缀              覆盖范围                          HBuilderX 已有版本示例
+          #   ─────────────────────────────────────────────────────────────────────
+          #   kotlin/           kotlin-stdlib 全系列             (stdlib-jdk7/8, stdlib-common)
+          #   kotlinx/          kotlinx-coroutines 等            (coroutines 1.8.1)
+          #   androidx/         AndroidX 全家桶                   (appcompat,core,activity,
+          #                                                      fragment,lifecycle,annotation,
+          #                                                      emoji2,drawerlayout,...)
+          #   android/support/   Jetifier 重映射的支持库           (support.v4 → androidx.core 映射)
+          #   okhttp3/          OkHttp 网络库                     (3.12.13 via LiveKit 传递)
+          #   okio/             OkIO (OkHttp 依赖)               (1.15.0 / 3.x)
+          #   com/squareup/     Square 全家桶 (OkHttp 上级)       (okhttp3, okio, etc.)
+          #   org/jetbrains/    JetBrains 注解                    (annotations 23.0.0)
+          #   org/intellij/     IntelliJ 注解                    (annotations 兼容)
+          #   com/google/gson/  Gson JSON 库                      (2.6.2 / 2.10.1)
+          #   com/google/common/ Guava/ListenableFuture           (concurrent-futures)
+          #
+          # 白名单保留 (不会被删除):
+          #   io/livekit/        LiveKit SDK 核心 ✅
+          #   livekit/org/webrtc/ Repackaged WebRTC ✅
+          #   org/webrtc/        标准 WebRTC ✅
+          #   com/livekit/c2ccall/ 插件代码 ✅
+          #
+          # 优势: 新增任何 HBuilderX 基座库只要落在上述前缀内，自动排除，无需手动维护
           # v4/v3 修复保留:
           #   1) Step 6 验证改为检查 classes.jar 内部内容
           #   2) 新增策略5: 全量扫描 Gradle cache 定位 livekit.org.webrtc Java 类
@@ -300,14 +324,12 @@ jobs:
             # 不退出，继续尝试从 deps-runtime.txt 合并
           fi
 
-          # ---- Step 3: 全量打包所有运行时依赖 (Full Fat AAR) v6 ----
-          # v6 策略: 先全量合并，再从合并目录中物理删除 HBuilderX 基座已有的包
-          #   这比依赖名模式匹配更可靠 — 直接操作 class 文件目录，100% 保证无重复
-          #   排除的包均来自 HBuilderX 云打包实际报错 (build_error_log.txt)
+          # ---- Step 3: 全量打包所有运行时依赖 (Full Fat AAR) v7 ----
+          # v7 策略: 先全量合并，再用广泛前缀黑名单删除 HBuilderX 基座通用库
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "[Step 3] Full Fat AAR v6: merge all deps then strip HBuilderX base..."
+          echo "[Step 3] Full Fat AAR v7: merge all deps then prefix-strip base libs..."
 
           # 3a: 插件自身代码
           if [ -f "$PLUGIN_EXTRACT/classes.jar" ] && [ -s "$PLUGIN_EXTRACT/classes.jar" ]; then
@@ -328,7 +350,7 @@ jobs:
               [ -f "$DEP_PATH" ] || continue
               DEP_NAME=$(basename "$DEP_PATH")
               
-              # 仅跳过插件自身和 uniapp stub (其余全部合入，后面统一剥离)
+              # 仅跳过插件自身和 uniapp stub
               echo "$DEP_NAME" | grep -qi "^livekit-c2ccall" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
               echo "$DEP_PATH" | grep -qi "uniapp" && { SKIP_CNT=$((SKIP_CNT+1)); continue; }
               
@@ -364,32 +386,40 @@ jobs:
             fi
           fi
 
-          # ---- Step 3c: 剥离 HBuilderX 基座已有的包 (核心修复!) ----
-          # v6: 不再依赖依赖名模式匹配(不可靠)，改为直接从合并后的 class 目录
-          #     物理删除冲突包。这是 100% 可靠的方法。
-          # 所有包均来自 HBuilderX 云打包实际报错 (build_error_log.txt)
+          # ---- Step 3c: 广泛前缀黑名单剥离 (v7 核心!) ----
+          # 不再逐个列举子包(会漏! v6 就漏了 appcompat/gson/emoji2/concurrent-futures)
+          # 改为按顶级前缀 rm -rf，覆盖整个库家族:
+          #   kotlin* kotlinx* androidx* android/support* okhttp3* okio*
+          #   com/squareup* org/jetbrains* org/intellij* com/google/gson* com/google/common*
+          #
+          # 白名单保护 (这些前缀不会被删除):
+          #   io/livekit/  livekit/org/webrtc/  org/webrtc/  com/livekit/
           echo ""
-          echo "[Step 3c] Stripping HBuilderX base packages from merged classes..."
+          echo "[Step 3c] Prefix-based strip (v7 broad blacklist)..."
           
           STRIP_BEFORE=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
           STRIPPED_PKGS=""
           
-          for strip_pkg in \
-            "kotlinx/coroutines"           \
-            "okhttp3"                       \
-            "okio"                          \
-            "org/jetbrains/annotations"    \
-            "org/intellij/lang/annotations"\
-            "kotlin"                        \
-            "androidx/annotation"           \
-            "androidx/core"                 \
-            "androidx/activity"             \
-            "androidx/fragment"             \
-            "androidx/lifecycle"; do
-            
-            if [ -d "$MERGED_CLASSES/$strip_pkg" ]; then              STRIP_CNT=$(find "$MERGED_CLASSES/$strip_pkg" -name "*.class" 2>/dev/null | wc -l)
-              rm -rf "$MERGED_CLASSES/$strip_pkg" 2>/dev/null || true
-              STRIPPED_PKGS="$STRIPPED_PKGS    ✗ $strip_pkg ($STRIP_CNT classes)\n"
+          # 定义黑名单前缀 (每个都是顶级目录名)
+          BLACKLIST_PREFIXES=(
+            "kotlin"
+            "kotlinx"
+            "androidx"
+            "android"
+            "okhttp3"
+            "okio"
+            "com/squareup"
+            "org/jetbrains"
+            "org/intellij"
+            "com/google/gson"
+            "com/google/common"
+          )
+          
+          for prefix in "${BLACKLIST_PREFIXES[@]}"; do
+            if [ -d "$MERGED_CLASSES/$prefix" ]; then
+              cnt=$(find "$MERGED_CLASSES/$prefix" -name "*.class" 2>/dev/null | wc -l)
+              rm -rf "$MERGED_CLASSES/$prefix" 2>/dev/null || true
+              STRIPPED_PKGS="${STRIPPED_PKGS}    ✗ $prefix/ ($cnt classes)\n"
             fi
           done
           
@@ -397,9 +427,21 @@ jobs:
           STRIPPED=$((STRIP_BEFORE - STRIP_AFTER))
           echo "  Stripped $STRIPPED classes ($STRIP_BEFORE → $STRIP_AFTER remaining)"
           if [ -n "$STRIPPED_PKGS" ]; then
-            echo "  Removed packages:"
+            echo "  Removed prefix families:"
             echo -e "$STRIPPED_PKGS"
           fi
+          
+          # 验证白名单包仍然存在
+          echo ""
+          echo "[Step 3d] Verifying whitelist packages preserved:"
+          for wp in "io/livekit" "livekit/org/webrtc" "org/webrtc" "com/livekit"; do
+            if [ -d "$MERGED_CLASSES/$wp" ]; then
+              wp_cnt=$(find "$MERGED_CLASSES/$wp" -name "*.class" 2>/dev/null | wc -l)
+              echo "  ✔ $wp/ ($wp_cnt classes)"
+            else
+              echo "  ✗ MISSING: $wp/ ⚠️"
+            fi
+          done
 
           # 打包最终 classes.jar
           CLASSES_OUT="$WORK/classes-fat.jar"
@@ -546,7 +588,7 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "  Full Fat AAR 构建完成! (v6 剥离版)"
+          echo "  Full Fat AAR 构建完成! (v7 广泛前缀黑名单)"
           echo "  文件:    livekit-c2c-fat.aar"
           echo "  总大小:  $FAT_SIZE"
           echo "  其中:"
