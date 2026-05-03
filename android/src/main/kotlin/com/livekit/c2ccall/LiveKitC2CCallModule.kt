@@ -581,72 +581,95 @@ class LiveKitC2CCallModule : UniModule() {
         observeLocalParticipant(r.localParticipant)
 
         // 7b. 发布本地摄像头 + 麦克风轨道
-        // ⚠️ 新策略：使用 Main 协程 + 分步执行 + 安全保护
-        //    1. 先开启麦克风（轻量操作）
-        //    2. 延迟 1 秒让 Room 完全稳定
-        //    3. 再开启摄像头（重量操作，涉及硬件访问）
-        //    4. 使用 try-catch 包裹每一步，防止单步崩溃影响整体
-        Log.d(TAG, "[DEBUG] 步骤7b: 启动媒体发布协程 (Main线程, 分步执行)...")
+        // ⚠️ 新策略：条件执行 + Main 线程 + 超时保护
+        //    - 根据用户参数决定是否开启麦克风/摄像头
+        //    - 每个操作都有独立的 try-catch 和超时保护
+        Log.d(TAG, "[DEBUG] 步骤7b: 启动媒体发布协程 (isAudioEnabled=$isAudioEnabled)...")
         scope.launch(Dispatchers.Main) {
             try {
-                // === 第1步: 开启麦克风（通常很快）===
-                Log.d(TAG, "[DEBUG] 步骤7b-1: 开启麦克风 isAudioEnabled=$isAudioEnabled...")
-                try {
-                    r.localParticipant.setMicrophoneEnabled(isAudioEnabled)
-                    Log.d(TAG, "[DEBUG] ✅ 步骤7b-1完成: 麦克风已${if(isAudioEnabled) "开启" else "关闭"}")
-                } catch (e: Exception) {
-                    Log.e(TAG, "[DEBUG] ❌ 步骤7b-1失败: 麦克风操作异常 - ${e.javaClass.simpleName}: ${e.message}")
+                // === 第1步: 可选开启麦克风 ===
+                if (isAudioEnabled) {
+                    Log.d(TAG, "[DEBUG] 步骤7b-1: 开启麦克风...")
+                    try {
+                        // 使用 withTimeoutOrNull 防止无限阻塞（最多等 5 秒）
+                        val micResult = kotlinx.coroutines.withTimeoutOrNull(5000L) {
+                            r.localParticipant.setMicrophoneEnabled(true)
+                            true
+                        }
+                        if (micResult == true) {
+                            Log.d(TAG, "[DEBUG] ✅ 步骤7b-1完成: 麦克风已开启")
+                        } else {
+                            Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-1超时: 麦克风操作超过5秒，跳过")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[DEBUG] ❌ 步骤7b-1失败: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                } else {
+                    Log.d(TAG, "[DEBUG] 步骤7b-1跳过: 用户关闭了音频 (audioOpts=false)")
                 }
 
-                // === 第2步: 等待 Room 稳定 ===
-                Log.d(TAG, "[DEBUG] 步骤7b-2: 等待 1000ms 让 Room 连接稳定...")
-                kotlinx.coroutines.delay(1000)
+                // === 第2步: 等待 Room 稳定 + 前端准备 ===
+                Log.d(TAG, "[DEBUG] 步骤7b-2: 等待 1500ms...")
+                kotlinx.coroutines.delay(1500)
 
-                // === 第3步: 开启摄像头（重量操作）===
+                // === 第3步: 开启摄像头 ===
                 Log.d(TAG, "[DEBUG] 步骤7b-3: 即将调用 setCameraEnabled(true)...")
                 Log.d(TAG, "[DEBUG] 当前线程=${Thread.currentThread().name}, Looper=${if(android.os.Looper.myLooper() != null) "✅" else "❌ null"}")
                 
+                var cameraSuccess = false
                 try {
-                    r.localParticipant.setCameraEnabled(true)
-                    Log.d(TAG, "[DEBUG] ✅ 步骤7b-3完成: setCameraEnabled(true) 成功返回")
+                    // 使用 withTimeoutOrNull 防止 Native Crash 导致无限等待（最多等 8 秒）
+                    val camResult = kotlinx.coroutines.withTimeoutOrNull(8000L) {
+                        r.localParticipant.setCameraEnabled(true)
+                        true
+                    }
+                    if (camResult == true) {
+                        Log.d(TAG, "[DEBUG] ✅ 步骤7b-3完成: setCameraEnabled(true) 成功返回")
+                        cameraSuccess = true
+                    } else {
+                        Log.w(TAG, "[DEBUG] ⚠️ 步骤7b-3超时: 摄像头操作超过8秒")
+                        sendEvent("onError", "摄像头初始化超时")
+                    }
                 } catch (e: Exception) {
-                    Log.e(TAG, "[DEBUG] ❌ 步骤7b-3失败: 摄像头操作异常 - ${e.javaClass.simpleName}: ${e.message}")
+                    Log.e(TAG, "[DEBUG] ❌ 步骤7b-3失败: ${e.javaClass.simpleName}: ${e.message}", e)
                     sendEvent("onError", "摄像头开启失败: ${e.message}")
-                    return@launch
                 } catch (e: Throwable) {
-                    Log.e(TAG, "[DEBUG] 💥 步骤7b-3严重错误: ${e.javaClass.simpleName}: ${e.message}", e)
-                    sendEvent("onError", "摄像头严重错误: ${e.javaClass.simpleName}")
-                    return@launch
+                    Log.e(TAG, "[DEBUG] 💥 步骤7b-3严重错误: ${e.javaClass.simpleName}", e)
+                    sendEvent("onError", "摄像头Native错误")
+                    // 不 return，继续执行后续状态检查
                 }
 
-                // === 第4步: 等待视频轨道发布 ===
-                Log.d(TAG, "[DEBUG] 步骤7b-4: 等待 500ms 让视频轨道发布完成...")
-                kotlinx.coroutines.delay(500)
+                // === 第4步: 等待视频轨道发布 + 状态检查 ===
+                if (cameraSuccess) {
+                    Log.d(TAG, "[DEBUG] 步骤7b-4: 等待 800ms 让视频轨道发布...")
+                    kotlinx.coroutines.delay(800)
+                }
 
-                // === 第5步: 检查状态并手动绑定（如果自动绑定未触发）===
-                Log.d(TAG, "[DEBUG] ===== 媒体状态检查 =====")
+                // === 最终状态检查 ===
+                Log.d(TAG, "[DEBUG] ===== 最终媒体状态 =====")
+                
                 val localVideoPub = findTrackPublication(r.localParticipant, Track.Kind.VIDEO)
                 val localAudioPub = findTrackPublication(r.localParticipant, Track.Kind.AUDIO)
+                val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
+                val remoteRenderer = LiveKitVideoView.remoteViewInstance?.getRenderer()
+                
                 Log.d(TAG, "[DEBUG] 本地视频轨道: ${if(localVideoPub != null) "✅ sid=${localVideoPub.sid}" else "❌ 未发布"}")
                 Log.d(TAG, "[DEBUG] 本地音频轨道: ${if(localAudioPub != null) "✅ sid=${localAudioPub.sid}" else "❌ 未发布"}")
-                Log.d(TAG, "[DEBUG] localRenderer: ${if(LiveKitVideoView.localViewInstance?.getRenderer() != null) "✅ 就绪" else "❌ 未就绪"}")
-                Log.d(TAG, "[DEBUG] remoteRenderer: ${if(LiveKitVideoView.remoteViewInstance?.getRenderer() != null) "✅ 就绪" else "❌ 未就绪"}")
+                Log.d(TAG, "[DEBUG] localRenderer: ${if(localRenderer != null) "✅ 就绪" else "❌ 未就绪"}")
+                Log.d(TAG, "[DEBUG] remoteRenderer: ${if(remoteRenderer != null) "✅ 就绪" else "❌ 未就绪"}")
 
-                // 如果视频轨道存在但还没绑定到 renderer，手动绑定
-                if (localVideoPub != null) {
-                    val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
-                    if (localRenderer != null) {
-                        bindTrackToRenderer(localVideoPub, localRenderer)
-                        Log.d(TAG, "[DEBUG] ✅ 手动绑定本地视频到 renderer 成功")
-                        sendEvent("onLocalVideoReady", "Local video ready")
-                    } else {
-                        Log.w(TAG, "[DEBUG] ⚠️ 视频轨道已发布但 local renderer 未就绪")
-                    }
+                // 手动绑定本地视频到 renderer（兜底）
+                if (localVideoPub != null && localRenderer != null) {
+                    bindTrackToRenderer(localVideoPub, localRenderer)
+                    Log.d(TAG, "[DEBUG] ✅ 手动绑定本地视频成功")
+                    sendEvent("onLocalVideoReady", "Local video ready")
+                } else if (localVideoPub != null && localRenderer == null) {
+                    Log.w(TAG, "[DEBUG] ⚠️ 视频已发布但 renderer 未就绪，等待组件创建...")
                 }
 
-                Log.d(TAG, "[DEBUG] ===== 媒体初始化全部完成 =====")
+                Log.d(TAG, "[DEBUG] ===== 媒体初始化流程结束 =====")
             } catch (e: Exception) {
-                Log.e(TAG, "[DEBUG] ❌ 媒体发布流程异常退出: ${e.javaClass.simpleName}: ${e.message}", e)
+                Log.e(TAG, "[DEBUG] ❌ 媒体发布流程异常: ${e.javaClass.simpleName}: ${e.message}", e)
             }
         }
         Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（Main线程异步执行）")
@@ -1028,11 +1051,21 @@ class LiveKitC2CCallModule : UniModule() {
     }
 
     /**
-     * 解析音频发布配置（LiveKit SDK 2.x 音频选项由内部自动管理）
+     * 解析音频发布配置
      */
-    private fun parseAudioPublishOptions(audioOpts: Map<String, Any>?): Unit {
-        // LiveKit Android SDK 2.x 的音频处理（降噪、回声消除等）由 SDK 内部自动管理
-        // 如需自定义音频参数，后续可通过 RoomOptions 配置
+    private fun parseAudioPublishOptions(audioOpts: Map<String, Any>?) {
+        if (audioOpts == null) {
+            isAudioEnabled = true // 默认开启
+            return
+        }
+        // 支持多种格式: "enabled": false / "enable": false / 直接传入 Boolean
+        isAudioEnabled = when {
+            audioOpts["enabled"] is Boolean -> audioOpts["enabled"] as Boolean
+            audioOpts["enable"] is Boolean -> audioOpts["enable"] as Boolean
+            audioOpts is Map<*, *> && audioOpts.containsKey("enabled") -> (audioOpts["enabled"] as? Boolean) ?: true
+            else -> true // 默认开启
+        }
+        Log.d(TAG, "[AUDIO] 解析音频选项完成: isAudioEnabled=$isAudioEnabled")
     }
 
     /**
