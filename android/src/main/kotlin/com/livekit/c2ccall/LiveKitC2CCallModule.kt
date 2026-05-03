@@ -581,54 +581,75 @@ class LiveKitC2CCallModule : UniModule() {
         observeLocalParticipant(r.localParticipant)
 
         // 7b. 发布本地摄像头 + 麦克风轨道
-        // ⚠️ 重要: 摄像头/麦克风操作必须在 IO 线程执行！
-        //    在 Main 线程调用 WebRTC Native 方法可能触发 SIGSEGV
-        Log.d(TAG, "[DEBUG] 步骤7b: 准备启动 setCameraEnabled 子协程 (IO线程)...")
-        scope.launch(Dispatchers.IO) {
+        // ⚠️ 新策略：使用 Main 协程 + 分步执行 + 安全保护
+        //    1. 先开启麦克风（轻量操作）
+        //    2. 延迟 1 秒让 Room 完全稳定
+        //    3. 再开启摄像头（重量操作，涉及硬件访问）
+        //    4. 使用 try-catch 包裹每一步，防止单步崩溃影响整体
+        Log.d(TAG, "[DEBUG] 步骤7b: 启动媒体发布协程 (Main线程, 分步执行)...")
+        scope.launch(Dispatchers.Main) {
             try {
-                // 延迟 500ms 让 Room 连接完全稳定
+                // === 第1步: 开启麦克风（通常很快）===
+                Log.d(TAG, "[DEBUG] 步骤7b-1: 开启麦克风 isAudioEnabled=$isAudioEnabled...")
+                try {
+                    r.localParticipant.setMicrophoneEnabled(isAudioEnabled)
+                    Log.d(TAG, "[DEBUG] ✅ 步骤7b-1完成: 麦克风已${if(isAudioEnabled) "开启" else "关闭"}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "[DEBUG] ❌ 步骤7b-1失败: 麦克风操作异常 - ${e.javaClass.simpleName}: ${e.message}")
+                }
+
+                // === 第2步: 等待 Room 稳定 ===
+                Log.d(TAG, "[DEBUG] 步骤7b-2: 等待 1000ms 让 Room 连接稳定...")
+                kotlinx.coroutines.delay(1000)
+
+                // === 第3步: 开启摄像头（重量操作）===
+                Log.d(TAG, "[DEBUG] 步骤7b-3: 即将调用 setCameraEnabled(true)...")
+                Log.d(TAG, "[DEBUG] 当前线程=${Thread.currentThread().name}, Looper=${if(android.os.Looper.myLooper() != null) "✅" else "❌ null"}")
+                
+                try {
+                    r.localParticipant.setCameraEnabled(true)
+                    Log.d(TAG, "[DEBUG] ✅ 步骤7b-3完成: setCameraEnabled(true) 成功返回")
+                } catch (e: Exception) {
+                    Log.e(TAG, "[DEBUG] ❌ 步骤7b-3失败: 摄像头操作异常 - ${e.javaClass.simpleName}: ${e.message}")
+                    sendEvent("onError", "摄像头开启失败: ${e.message}")
+                    return@launch
+                } catch (e: Throwable) {
+                    Log.e(TAG, "[DEBUG] 💥 步骤7b-3严重错误: ${e.javaClass.simpleName}: ${e.message}", e)
+                    sendEvent("onError", "摄像头严重错误: ${e.javaClass.simpleName}")
+                    return@launch
+                }
+
+                // === 第4步: 等待视频轨道发布 ===
+                Log.d(TAG, "[DEBUG] 步骤7b-4: 等待 500ms 让视频轨道发布完成...")
                 kotlinx.coroutines.delay(500)
-                Log.d(TAG, "[DEBUG] 步骤7b-1: localParticipant 获取成功, identity=${r.localParticipant.identity}")
-                
-                // 打印当前线程信息用于诊断
-                Log.d(TAG, "[DEBUG] 步骤7b-1b: 当前线程=${Thread.currentThread().name}, isDaemon=${Thread.currentThread().isDaemon}")
-                
-                Log.d(TAG, "[DEBUG] 步骤7b-2: 即将调用 local.setCameraEnabled(true)...")
-                
-                // 根据用户传入的视频选项决定是否开启摄像头（默认开启）
-                r.localParticipant.setCameraEnabled(true)
-                Log.d(TAG, "[DEBUG] 步骤7b-3: ✅ setCameraEnabled(true) 成功返回!")
-                
-                // 等待一小段时间让 track publication 完成
-                kotlinx.coroutines.delay(100)
-                Log.d(TAG, "[DEBUG] 步骤7b-4: 检查本地视频发布状态...")
-                
+
+                // === 第5步: 检查状态并手动绑定（如果自动绑定未触发）===
+                Log.d(TAG, "[DEBUG] ===== 媒体状态检查 =====")
                 val localVideoPub = findTrackPublication(r.localParticipant, Track.Kind.VIDEO)
-                Log.d(TAG, "[DEBUG] 步骤7b-5: 本地视频 publication=${if (localVideoPub != null) "✅ ${localVideoPub.sid}" else "❌ null"}")
-                
-                Log.d(TAG, "[DEBUG] 步骤7c-1: 即将调用 local.setMicrophoneEnabled($isAudioEnabled)...")
-                r.localParticipant.setMicrophoneEnabled(isAudioEnabled)
-                Log.d(TAG, "[DEBUG] 步骤7c-2: ✅ setMicrophoneEnabled 成功返回! (enabled=$isAudioEnabled)")
-                
-                // 最终状态检查
-                kotlinx.coroutines.delay(200)
-                Log.d(TAG, "[DEBUG] ===== 媒体初始化最终状态 =====")
-                Log.d(TAG, "[DEBUG] 本地 video tracks: ${r.localParticipant.trackPublications.values.filter { it.kind == Track.Kind.VIDEO }.map { it.sid }}")
-                Log.d(TAG, "[DEBUG] 本地 audio tracks: ${r.localParticipant.trackPublications.values.filter { it.kind == Track.Kind.AUDIO }.map { it.sid }}")
-                Log.d(TAG, "[DEBUG] localRenderer ready: ${LiveKitVideoView.localViewInstance?.getRenderer() != null}")
-                Log.d(TAG, "[DEBUG] remoteRenderer ready: ${LiveKitVideoView.remoteViewInstance?.getRenderer() != null}")
+                val localAudioPub = findTrackPublication(r.localParticipant, Track.Kind.AUDIO)
+                Log.d(TAG, "[DEBUG] 本地视频轨道: ${if(localVideoPub != null) "✅ sid=${localVideoPub.sid}" else "❌ 未发布"}")
+                Log.d(TAG, "[DEBUG] 本地音频轨道: ${if(localAudioPub != null) "✅ sid=${localAudioPub.sid}" else "❌ 未发布"}")
+                Log.d(TAG, "[DEBUG] localRenderer: ${if(LiveKitVideoView.localViewInstance?.getRenderer() != null) "✅ 就绪" else "❌ 未就绪"}")
+                Log.d(TAG, "[DEBUG] remoteRenderer: ${if(LiveKitVideoView.remoteViewInstance?.getRenderer() != null) "✅ 就绪" else "❌ 未就绪"}")
+
+                // 如果视频轨道存在但还没绑定到 renderer，手动绑定
+                if (localVideoPub != null) {
+                    val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
+                    if (localRenderer != null) {
+                        bindTrackToRenderer(localVideoPub, localRenderer)
+                        Log.d(TAG, "[DEBUG] ✅ 手动绑定本地视频到 renderer 成功")
+                        sendEvent("onLocalVideoReady", "Local video ready")
+                    } else {
+                        Log.w(TAG, "[DEBUG] ⚠️ 视频轨道已发布但 local renderer 未就绪")
+                    }
+                }
+
+                Log.d(TAG, "[DEBUG] ===== 媒体初始化全部完成 =====")
             } catch (e: Exception) {
-                Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败 (Exception): ${e.javaClass.simpleName}: ${e.message}", e)
-                // 切回主线程发送事件（忽略异常）
-                try { kotlinx.coroutines.withContext(Dispatchers.Main) { sendEvent("onError", "发布本地媒体失败: ${e.javaClass.simpleName} - ${e.message}") } } catch (_: Exception) {}
-            } catch (e: Throwable) {
-                // 捕获包括 Error 在内的所有Throwable（如 UnsatisfiedLinkError 等）
-                // 注意: SIGSEGV/SIGABRT 等 Native Signal 无法被 Java 层捕获
-                Log.e(TAG, "[DEBUG] 💥💥💥 Native Crash 或严重错误 (Throwable): ${e.javaClass.simpleName}: ${e.message}", e)
-                try { kotlinx.coroutines.withContext(Dispatchers.Main) { sendEvent("onError", "Native 崩溃: ${e.javaClass.simpleName} - ${e.message}") } } catch (_: Exception) {}
+                Log.e(TAG, "[DEBUG] ❌ 媒体发布流程异常退出: ${e.javaClass.simpleName}: ${e.message}", e)
             }
         }
-        Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（IO线程异步执行）")
+        Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（Main线程异步执行）")
 
         // 7d. 订阅已存在的远端参与者媒体轨道
         Log.d(TAG, "[DEBUG] 步骤7d: 订阅远端参与者...")
