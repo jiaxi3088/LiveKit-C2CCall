@@ -380,7 +380,7 @@ jobs:
           # ---- Step 4: 收集所有 .so 原生库 ----
           JNI_OUT="$WORK/jni"
           mkdir -p "$JNI_OUT"
-          TARGET_ABIS="armeabi-v7a arm64-v8a"
+          TARGET_ABIS="arm64-v8a"
           echo ""
           echo "[Step 4] Collecting .so native libraries..."
 
