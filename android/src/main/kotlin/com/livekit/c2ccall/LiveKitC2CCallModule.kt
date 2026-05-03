@@ -105,10 +105,14 @@ class LiveKitC2CCallModule : UniModule() {
                     try {
                         room?.events?.events?.collect { event: RoomEvent ->
                             Log.d(TAG, "[DEBUG] 收到 RoomEvent: ${event::class.simpleName}")
-                            handleRoomEvent(event)
+                            try {
+                                handleRoomEvent(event)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "[DEBUG] ❌ handleRoomEvent 异常: event=${event::class.simpleName}, err=${e.javaClass.simpleName}: ${e.message}", e)
+                            }
                         }
                     } catch (e: Throwable) {
-                        Log.e(TAG, "[DEBUG] ❌ 事件收集协程异常: ${e.message}", e)
+                        Log.e(TAG, "[DEBUG] ❌ 事件收集协程异常: ${e.javaClass.simpleName}: ${e.message}", e)
                     }
                     Log.d(TAG, "[DEBUG] 事件收集协程结束")
                 }
@@ -119,11 +123,14 @@ class LiveKitC2CCallModule : UniModule() {
                 Log.d(TAG, "[DEBUG] 步骤6完成: room.connect 成功")
 
                 // ===== 步骤7: 初始化视频渲染 + 发布本地媒体 + 订阅远端媒体 =====
+                Log.d(TAG, "[DEBUG] 步骤6完成后的状态检查: room=$room, room.isActive=${room?.isActive}")
                 initMediaAfterConnect()
                 
+                Log.d(TAG, "[DEBUG] 即将调用 invokeSuccess...")
                 invokeSuccess(callback, "呼叫已发起")
+                Log.d(TAG, "[DEBUG] invokeSuccess 返回成功")
                 announceForAccessibility("正在发起视频通话")
-                Log.d(TAG, "[DEBUG] startC2CVideoCall 全部成功")
+                Log.d(TAG, "[DEBUG] startC2CVideoCall 全部成功 - 等待异步操作完成...")
             } catch (e: Throwable) {
                 Log.e(TAG, "[DEBUG] ❌ startC2CVideoCall 崩溃: ${e.javaClass.simpleName}: ${e.message}", e)
                 invokeError(callback, "发起呼叫失败: ${e.javaClass.simpleName} - ${e.message}")
@@ -508,17 +515,23 @@ class LiveKitC2CCallModule : UniModule() {
      * 处理房间事件
      */
     private fun handleRoomEvent(event: RoomEvent) {
+        Log.d(TAG, "[EVENT] handleRoomEvent: ${event::class.simpleName}")
         when (event) {
             is RoomEvent.Connected -> {
+                Log.d(TAG, "[EVENT] RoomEvent.Connected 处理开始")
                 stopRing()
                 sendEvent("onConnected", "通话已接通")
                 announceForAccessibility("通话已接通")
 
                 // 为远端参与者注册事件监听 + 订阅其媒体轨道
+                val remoteCount = room?.remoteParticipants?.size ?: 0
+                Log.d(TAG, "[EVENT] Connected: 远端参与者数量=$remoteCount")
                 room?.remoteParticipants?.values?.forEach { remote ->
+                    Log.d(TAG, "[EVENT] Connected: 观察远端参与者 ${remote.identity}")
                     observeRemoteParticipant(remote)
                     subscribeRemoteTracks(remote)
                 }
+                Log.d(TAG, "[EVENT] RoomEvent.Connected 处理完成")
             }
             is RoomEvent.Disconnected -> {
                 stopRing()
@@ -526,6 +539,7 @@ class LiveKitC2CCallModule : UniModule() {
                 announceForAccessibility("通话断开")
             }
             is RoomEvent.ParticipantConnected -> {
+                Log.d(TAG, "[EVENT] ParticipantConnected: ${event.participant.identity}")
                 observeRemoteParticipant(event.participant)
                 subscribeRemoteTracks(event.participant)
             }
@@ -535,7 +549,7 @@ class LiveKitC2CCallModule : UniModule() {
                 announceForAccessibility("对方已挂断")
             }
             else -> {
-                // 其他事件不处理
+                Log.d(TAG, "[EVENT] 未处理的事件类型: ${event::class.simpleName}")
             }
         }
     }
@@ -545,38 +559,57 @@ class LiveKitC2CCallModule : UniModule() {
      */
     private fun initMediaAfterConnect() {
         Log.d(TAG, "[DEBUG] 步骤7: 初始化媒体")
-        val r = room ?: return
+        val r = room ?: run {
+            Log.e(TAG, "[DEBUG] ❌ 步骤7失败: room 为 null!")
+            return
+        }
+        Log.d(TAG, "[DEBUG] 步骤7: room OK, localParticipant=${r.localParticipant?.identity}")
 
         // 7a. 确保共享 EglBase 已初始化（由 LiveKitVideoView 组件管理）
+        Log.d(TAG, "[DEBUG] 步骤7a: 检查 WebRTC 可用性...")
         if (LiveKitVideoView.isWebRtcAvailable()) {
-            LiveKitVideoView.getSharedEglBase()
+            Log.d(TAG, "[DEBUG] 步骤7a: WebRTC available, 创建 EglBase...")
+            val eglBase = LiveKitVideoView.getSharedEglBase()
+            Log.d(TAG, "[DEBUG] 步骤7a: EglBase created=$eglBase")
         } else {
             Log.w(TAG, "[DEBUG] 步骤7a: WebRTC not available in runtime, video rendering disabled")
         }
         Log.d(TAG, "[DEBUG] 步骤7a: EglBase check done")
 
         // 7b. 发布本地摄像头 + 麦克风轨道
+        Log.d(TAG, "[DEBUG] 步骤7b: 准备启动 setCameraEnabled 子协程...")
         scope.launch {
             try {
                 val local = r.localParticipant
+                Log.d(TAG, "[DEBUG] 步骤7b-1: localParticipant 获取成功, identity=${local.identity}")
+                Log.d(TAG, "[DEBUG] 步骤7b-2: 即将调用 local.setCameraEnabled(true)...")
+                
                 // 根据用户传入的视频选项决定是否开启摄像头（默认开启）
                 local.setCameraEnabled(true)
-                Log.d(TAG, "[DEBUG] 步骤7b: 本地摄像头已发布")
+                Log.d(TAG, "[DEBUG] 步骤7b-3: ✅ setCameraEnabled(true) 成功返回!")
                 
+                Log.d(TAG, "[DEBUG] 步骤7c-1: 即将调用 local.setMicrophoneEnabled($isAudioEnabled)...")
                 local.setMicrophoneEnabled(isAudioEnabled)
-                Log.d(TAG, "[DEBUG] 步骤7c: 本地麦克风已发布 (enabled=$isAudioEnabled)")
+                Log.d(TAG, "[DEBUG] 步骤7c-2: ✅ setMicrophoneEnabled 成功返回! (enabled=$isAudioEnabled)")
             } catch (e: Exception) {
-                Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败: ${e.message}", e)
-                sendEvent("onError", "发布本地媒体失败: ${e.message}")
+                Log.e(TAG, "[DEBUG] ❌ 发布本地媒体失败: ${e.javaClass.simpleName}: ${e.message}", e)
+                sendEvent("onError", "发布本地媒体失败: ${e.javaClass.simpleName} - ${e.message}")
+            } catch (e: Throwable) {
+                // 捕获包括 Error 在内的所有Throwable（如 UnsatisfiedLinkError, SIGSEGV 等）
+                Log.e(TAG, "[DEBUG] 💥💥💥 Native Crash 或严重错误: ${e.javaClass.simpleName}: ${e.message}", e)
+                sendEvent("onError", "Native 崩溃: ${e.javaClass.simpleName} - ${e.message}")
             }
         }
+        Log.d(TAG, "[DEBUG] 步骤7b/c: 子协程已启动（异步执行）")
 
         // 7c. 订阅已存在的远端参与者媒体轨道
+        Log.d(TAG, "[DEBUG] 步骤7d: 订阅远端参与者...")
         r.remoteParticipants.values.forEach { remote ->
+            Log.d(TAG, "[DEBUG] 步骤7d: 发现远端参与者: ${remote.identity}")
             subscribeRemoteTracks(remote)
         }
         
-        Log.d(TAG, "[DEBUG] 步骤7完成: 媒体初始化完毕")
+        Log.d(TAG, "[DEBUG] 步骤7完成: 媒体初始化完毕（注意：setCameraEnabled/setMicrophoneEnabled 是异步的）")
     }
 
     /**

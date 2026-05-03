@@ -896,6 +896,11 @@ jobs:
 
       - name: Assemble plugin package
         run: |
+          # 生成带时间戳的 ZIP 文件名（格式: LiveKit-C2CCall-vYYYYMMDDHHmm.zip）
+          TIMESTAMP=$(date -u +"%Y%m%d%H%M")
+          ZIP_NAME="LiveKit-C2CCall-v${TIMESTAMP}.zip"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
           mkdir -p android ios
           cp artifacts/android/livekit-c2c-fat.aar android/livekit-c2c.aar
           cp -R artifacts/ios/LiveKitC2CCall.framework ios/
@@ -908,29 +913,29 @@ jobs:
           rm -rf artifacts
 
           # 在 GITHUB_WORKSPACE 内直接打包，避免 cd .. 导致路径混乱
-          zip -r LiveKit-C2CCall-v1.0.0.zip ./ \
+          zip -r "$ZIP_NAME" ./ \
             -x "DEVELOPMENT.md" ".git/*"
 
           echo "=== ZIP created ==="
-          ls -la LiveKit-C2CCall-v1.0.0.zip
-          unzip -l LiveKit-C2CCall-v1.0.0.zip | head -30
+          ls -la "$ZIP_NAME"
+          unzip -l "$ZIP_NAME" | head -30
 
       - name: Upload plugin ZIP (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: livekit-c2c-plugin
-          path: LiveKit-C2CCall-v1.0.0.zip
+          path: ${{ env.ZIP_NAME }}
           if-no-files-found: error
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
-          name: LiveKit-C2CCall v1.0.0
+          tag_name: v${{ env.ZIP_NAME }}
+          name: LiveKit-C2CCall ${{ env.ZIP_NAME }}
           body: |
             ## uni-app 原生插件自动构建产物
 
-            **构建时间**: ${{ github.run_started_at }}
+            **构建时间**: ${{ github.run_started_at }} (UTC)
             **Commit**: ${{ github.sha }}
             **触发**: ${{ github.event_name }}
 
@@ -938,10 +943,10 @@ jobs:
 
             | 文件 | 说明 |
             |------|------|
-            `LiveKit-C2CCall-v1.0.0.zip` | 完整插件包（含 Android + iOS），解压后放入 UniApp 项目 `nativeplugins/` 目录即可 |
+            `${{ env.ZIP_NAME }}` | 完整插件包（含 Android + iOS），解压后放入 UniApp 项目 `nativeplugins/` 目录即可 |
 
             > 解压后目录结构：`LiveKit-C2CCall/android/livekit-c2c.aar` + `LiveKit-C2CCall/ios/LiveKitC2CCall.framework`
-          files: LiveKit-C2CCall-v1.0.0.zip
+          files: ${{ env.ZIP_NAME }}
           draft: false
           prerelease: false
         env:
