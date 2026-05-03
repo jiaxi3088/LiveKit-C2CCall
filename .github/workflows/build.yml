@@ -95,11 +95,14 @@ jobs:
         run: |
           set -e
 
-          # ====== Full Fat AAR: 全部依赖自包含 v2 ======
+          # ====== Full Fat AAR: 全部依赖自包含 v3 ======
           # 不再依赖 HBuilderX 解析 Maven 依赖
           # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + 所有 .so
-          # 预期大小: ~30-40MB
-          # 修复: 解决 livekit.org.webrtc.PeerConnectionFactory$InitializationOptions ClassNotFoundException
+          # 预期大小: ~30-50MB
+          # v3 修复:
+          #   1) Step 6 验证改为检查 classes.jar 内部内容（之前错误地在 AAR 顶层搜索）
+          #   2) 新增策略5: 全量扫描 Gradle cache 定位 livekit.org.webrtc Java 类
+          #      (android-prefixed 仅含 .so，Java 类来自 livekit-android-webrtc 或内嵌于 livekit-android)
 
           ANDROID_ROOT="$(pwd)"
           WORK="$ANDROID_ROOT/fat-aar-work"
@@ -146,6 +149,22 @@ jobs:
             fi
             echo "[Step 2] ✓ LiveKit SDK found: $(basename $LIVEKIT_AAR) ($(du -h $LIVEKIT_AAR | cut -f1))"
             ls -la "$LIVEKIT_DIR/" 2>/dev/null || true
+
+            # 诊断: 检查 LiveKit SDK 自身是否已包含 livekit.org.webrtc 类
+            if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
+              LK_INTERNAL_WC=$(unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "livekit/org/webrtc/" | head -5)
+              LK_INTERNAL_IO=$(unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "io/livekit/" | wc -l)
+              echo "[Step 2]   Diagnostic: io.livekit.* classes in SDK: $LK_INTERNAL_IO"
+              if [ -n "$LK_INTERNAL_WC" ]; then
+                echo "[Step 2]   ✅ livekit.org.webrtc.* found INSIDE livekit-android AAR:"
+                echo "$LK_INTERNAL_WC"
+              else
+                echo "[Step 2]   ℹ livekit.org.webrtc.* NOT inside livekit-android (expected in separate artifact)"
+              fi
+              # 列出 LiveKit classes.jar 的顶层包
+              echo "[Step 2]   Top packages in livekit-android classes.jar:"
+              unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "\.class$" | cut -d'/' -f1-3 | sort -u | head -20
+            fi
           else
             echo "[Step 2] ✗ FATAL: LiveKit AAR not found!"
             exit 1
@@ -224,9 +243,49 @@ jobs:
               
               # 严重警告: 如果没有 livekit.org.webrtc 类，运行时会崩溃!
               if echo "$LK_WC_CHECK" | grep -q "NOT_FOUND"; then
-                echo "[Step 2b] ⚠️ WARNING: No livekit.org.webrtc.* classes found!"
-                echo "[Step 2b]   This will cause runtime crash: NoClassDefFoundError"
-                echo "[Step 2b]   The app needs livekit.org.webrtc.PeerConnectionFactory\$InitializationOptions"
+                echo "[Step 2b] ⚠️ WARNING: No livekit.org.webrtc.* classes in this AAR!"
+                echo "[Step 2b]   $(basename $WEBRTC_AAR) appears to be a native-only (.so) artifact"
+                echo "[Step 2b]   Searching for separate Java-class artifact..."
+                
+                # 策略5: 搜索整个 Gradle cache 中包含 livekit.org.webrtc 的 JAR/AAR（不限位置）
+                WEBRTC_JAVA_JAR=""
+                for candidate in $(find "$GRADLE_CACHE" -name "*.jar" -o -name "*.aar" 2>/dev/null | head -200); do
+                  if unzip -l "$candidate" 2>/dev/null | grep -q "livekit/org/webrtc/PeerConnectionFactory"; then
+                    WEBRTC_JAVA_JAR="$candidate"
+                    echo "[Step 2b]   ✅ Found livekit.org.webrtc classes in: $(basename $candidate)"
+                    echo "[Step 2b]      Path: $candidate"
+                    echo "[Step 2b]      Size: $(du -h $candidate | cut -f1)"
+                    break
+                  fi
+                done
+                
+                if [ -n "$WEBRTC_JAVA_JAR" ] && [ -f "$WEBRTC_JAVA_JAR" ]; then
+                  # 将找到的 Java 类解压到 WEBRTC_DIR（合并到 classes.jar）
+                  mkdir -p "$WEBRTC_DIR/java-classes"
+                  if [[ "$WEBRTC_JAVA_JAR" == *.aar ]]; then
+                    TMP_JAVAExtract="$WORK/webrtc-java-tmp"
+                    rm -rf "$TMP_JAVAExtract" && mkdir -p "$TMP_JAVAExtract"
+                    unzip -qo "$WEBRTC_JAVA_JAR" -d "$TMP_JAVAExtract" 2>/dev/null || true
+                    if [ -f "$TMP_JAVAExtract/classes.jar" ] && [ -s "$TMP_JAVAExtract/classes.jar" ]; then
+                      unzip -qo "$TMP_JAVAExtract/classes.jar" -d "$WEBRTC_DIR/java-classes" 2>/dev/null || true
+                    fi
+                    rm -rf "$TMP_JAVAExtract"
+                  else
+                    unzip -qo "$WEBRTC_JAVA_JAR" -d "$WEBRTC_DIR/java-classes" 2>/dev/null || true
+                  fi
+                  
+                  JAVA_WC_CNT=$(find "$WEBRTC_DIR/java-classes" -name "*.class" 2>/dev/null | wc -l)
+                  echo "[Step 2b]   ✅ Extracted $JAVA_WC_CNT livekit.org.webrtc.* class files"
+                  
+                  # 验证关键类
+                  if [ -f "$WEBRTC_DIR/java-classes/livekit/org/webrtc/PeerConnectionFactory.class" ] || \
+                     [ -f "$WEBRTC_DIR/java-classes/livekit/org/webrtc/PeerConnectionFactory\$InitializationOptions.class" ]; then
+                    echo "[Step 2b]   ✅ Key class PeerConnectionFactory confirmed!"
+                  fi
+                else
+                  echo "[Step 2b]   ❌ Could NOT find livekit.org.webrtc Java classes anywhere!"
+                  echo "[Step 2b]   The app WILL crash with NoClassDefFoundError on LiveKit.init()"
+                fi
               fi
             else
               echo "[Step 2b]   ⚠ No classes.jar in WebRTC AAR"
@@ -304,6 +363,14 @@ jobs:
 
           # 打包最终 classes.jar
           CLASSES_OUT="$WORK/classes-fat.jar"
+          
+          # 3c: 补充 Step 2b 找到的独立 WebRTC Java 类 (livekit.org.webrtc.*)
+          if [ -d "$WEBRTC_DIR/java-classes" ] && [ "$(ls -A $WEBRTC_DIR/java-classes 2>/dev/null)" ]; then
+            cp -r "$WEBRTC_DIR/java-classes/"* "$MERGED_CLASSES/" 2>/dev/null || true
+            WC_JAVA_CNT=$(find "$WEBRTC_DIR/java-classes" -name "*.class" 2>/dev/null | wc -l)
+            echo "  ✓ WebRTC Java classes (livekit.org.webrtc.*): $WC_JAVA_CNT classes"
+          fi
+          
           (cd "$MERGED_CLASSES" && \
             rm -rf META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/MANIFEST.MF META-INF/*.pro 2>/dev/null; \
             jar cf "$CLASSES_OUT" . )
@@ -386,30 +453,50 @@ jobs:
 
           (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
 
-          # ---- 验证 ----
+          # ---- 验证 (检查 classes.jar 内部内容) ----
           echo ""
-          echo "[Step 6] Verifying final AAR..."
-          
-          # 基本完整性检查
-          FINAL_LK=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "io/livekit/" | wc -l)
+          echo "[Step 6] Verifying final AAR (inspecting classes.jar content)..."
+          FINAL_AAR="$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar"
+
+          # 关键修复: 之前用 unzip -l 在 AAR 层级搜索，但类嵌套在 classes.jar 内部！
+          # 正确做法: 检查 CLASSES_OUT (已经打包好的 classes.jar) 的内容
+          FINAL_LK=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "io/livekit/" | wc -l)
           echo "  io.livekit/* entries: $FINAL_LK"
-          FINAL_WC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "org/webrtc/" | wc -l)
+          FINAL_WC=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "org/webrtc/" | wc -l)
           echo "  org.webrtc/* entries: $FINAL_WC"
-          FINAL_LK_WC=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "livekit/org/webrtc/" | wc -l)
-          echo "  livekit.org.webrtc/* entries: $FINAL_LK_WC"
-          FINAL_SO=$(unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" 2>/dev/null | grep "\.so$" | wc -l)
+          FINAL_LK_WC=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "livekit/org/webrtc/" | wc -l)
+          echo "  livekit.org.webrtc.* entries: $FINAL_LK_WC"
+          FINAL_SO=$(unzip -l "$FINAL_AAR" 2>/dev/null | grep "\.so$" | wc -l)
           echo "  .so files: $FINAL_SO"
-          
+
+          # 额外诊断: 显示实际包含的顶层包
+          echo ""
+          echo "  Top-level packages in classes.jar:"
+          unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | cut -d'/' -f1-3 | sort -u | head -30
+
           # Full Fat 模式下如果 LiveKit 类都不存在，说明 exportDeps 有问题
           if [ "$FINAL_LK" -lt 10 ]; then
             echo ""
             echo "=========================================="
             echo "  ❌ FATAL: io.livekit.* classes < 10!"
-            echo "  Full Fat AAR 几乎为空，exportDeps 可能未正确执行"
+            echo "  Full Fat AAR 缺少 LiveKit SDK 类"
+            echo "  调试信息:"
+            echo "    classes.jar 大小: $(du -h $CLASSES_OUT | cut -f1)"
+            echo "    总类数: $CLASS_CNT"
+            echo "    尝试查看 classes.jar 内容:"
+            unzip -l "$CLASSES_OUT" 2>/dev/null | head -20
             echo "=========================================="
             exit 1
           fi
-          
+
+          # 警告: livekit.org.webrtc 缺失（运行时可能崩溃）
+          if [ "$FINAL_LK_WC" -lt 5 ]; then
+            echo ""
+            echo "  ⚠️ WARNING: livekit.org.webrtc.* classes < 5!"
+            echo "    LiveKit.init() 可能崩溃: NoClassDefFoundError"
+            echo "    PeerConnectionFactory\$InitializationOptions"
+          fi
+
           echo ""
           echo "  ✅ Full Fat AAR 验证通过 ($CLASS_CNT classes packed)"
 
@@ -427,8 +514,9 @@ jobs:
           echo "    jni (.so):   ${JNI_SIZE:-0} ($FINAL_SO files)"
           echo "  包含:"
           echo "    - 插件代码 (com.livekit.c2ccall.*)"
-          echo "    - LiveKit SDK (io.livekit.* + livekit.org.*)"
+          echo "    - LiveKit SDK (io.livekit.*)"
           [ "$FINAL_WC" -gt 0 ] && echo "    - WebRTC (org.webrtc.*)"
+          [ "$FINAL_LK_WC" -gt 0 ] && echo "    - Repackaged WebRTC (livekit.org.webrtc.*) ✅" || echo "    - ⚠️ Repackaged WebRTC: MISSING (may crash!)"
           echo "========================================="
           echo ""
           echo "AAR 内容列表:"
