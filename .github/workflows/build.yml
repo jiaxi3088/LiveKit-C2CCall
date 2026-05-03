@@ -95,46 +95,22 @@ jobs:
         run: |
           set -e
 
-          # ====== Full Fat AAR: 全部依赖自包含 v7 ======
-          # 不再依赖 HBuilderX 解析 Maven 依赖
-          # 此 AAR 包含: 插件代码 + LiveKit SDK + WebRTC(livekit.org.webrtc+org.webrtc) + arm64 .so
-          # ═════════════════════════════════════════════════════
-          # v7.2 核心变更: 修补遗漏的 _COROUTINE 顶层包
-          # ═════════════════════════════════════════════════════
-          # v7.1 后 HBuilderX 5.05 云打包仍报错:
-          #   Duplicate class _COROUTINE.ArtificialStackFiles found in
-          #   kotlinx-coroutines-core-jvm-1.8.1.jar and livekit-c2c.aar
+          # ====== Full Fat AAR: 全量依赖自包含 v8 (保守全量打包) ======
+          # 此 AAR 包含: 插件代码 + LiveKit SDK + 全部传递依赖 + WebRTC + arm64 .so
+          # ════════════════════════════════════════════════════════════════════
+          # v8 核心变更: 废除黑名单模式，全量保留所有 .class 文件
+          # ════════════════════════════════════════════════════════════════════
           #
-          # 根因: kotlinx-coroutines 内部使用特殊的 _COROUTINE 顶层包存放
-          #       调试/边界标记类, 这些类不在 kotlinx/ 子目录下!
-          #       当前前缀黑名单只匹配 kotlin/ 和 kotlinx/, 遗漏了 _COROUTINE/
+          # 黑名单模式的死胡同教训:
+          #   v7    删除 kotlinx/*     → 运行时缺 JsonKt           ❌
+          #   v7.5  保留 serialization → 运行时缺 SdpFactory       ❌
+          #   下一步? 可能还缺 livekit.org.webrtc.xxx 等...
           #
-          # 修复: 新增 "_COROUTINE" 前缀到黑名单
-          # 预期大小: ~15-20MB (v7.2: 补充 _COROUTINE 前缀)
+          # 根因: 无法预先枚举 LiveKit SDK 的所有间接依赖
           #
-          #   前缀              覆盖范围                          HBuilderX 已有版本示例
-          #   ─────────────────────────────────────────────────────────────────────
-          #   kotlin/           kotlin-stdlib 全系列             (stdlib-jdk7/8, stdlib-common)
-          #   kotlinx/          kotlinx-coroutines 等            (coroutines 1.8.1)
-          #   androidx/         AndroidX 全家桶                   (appcompat,core,activity,
-          #                                                      fragment,lifecycle,annotation,
-          #                                                      emoji2,drawerlayout,...)
-          #   android/support/   Jetifier 重映射的支持库           (support.v4 → androidx.core 映射)
-          #   okhttp3/          OkHttp 网络库                     (3.12.13 via LiveKit 传递)
-          #   okio/             OkIO (OkHttp 依赖)               (1.15.0 / 3.x)
-          #   com/squareup/     Square 全家桶 (OkHttp 上级)       (okhttp3, okio, etc.)
-          #   org/jetbrains/    JetBrains 注解                    (annotations 23.0.0)
-          #   org/intellij/     IntelliJ 注解                    (annotations 兼容)
-          #   com/google/gson/  Gson JSON 库                      (2.6.2 / 2.10.1)
-          #   com/google/common/ Guava/ListenableFuture           (concurrent-futures)
-          #
-          # 白名单保留 (不会被删除):
-          #   io/livekit/        LiveKit SDK 核心 ✅
-          #   livekit/org/webrtc/ Repackaged WebRTC ✅
-          #   org/webrtc/        标准 WebRTC ✅
-          #   com/livekit/c2ccall/ 插件代码 ✅
-          #
-          # 优势: 新增任何 HBuilderX 基座库只要落在上述前缀内，自动排除，无需手动维护
+          # v8 策略: 不再主动删除任何 .class 文件!
+          #   仅删除 _COROUTINE/* (唯一确认的顶层包冲突源)
+          #   打包时只包含 *.class (避免 META-INF 资源冲突)
           # v4/v3 修复保留:
           #   1) Step 6 验证改为检查 classes.jar 内部内容
           #   2) 新增策略5: 全量扫描 Gradle cache 定位 livekit.org.webrtc Java 类
@@ -331,12 +307,12 @@ jobs:
             # 不退出，继续尝试从 deps-runtime.txt 合并
           fi
 
-          # ---- Step 3: 全量打包所有运行时依赖 (Full Fat AAR) v7 ----
-          # v7 策略: 先全量合并，再用广泛前缀黑名单删除 HBuilderX 基座通用库
+          # ---- Step 3: 全量打包所有运行时依赖 (Full Fat AAR) v8 ----
+          # v8 策略: 合并所有依赖 + 仅删除 _COROUTINE + 只打包 .class
           MERGED_CLASSES="$WORK/merged-classes"
           mkdir -p "$MERGED_CLASSES"
           echo ""
-          echo "[Step 3] Full Fat AAR v7: merge all deps then prefix-strip base libs..."
+          echo "[Step 3] Full Fat AAR v8: merge ALL deps, conservative pack..."
 
           # 3a: 插件自身代码
           if [ -f "$PLUGIN_EXTRACT/classes.jar" ] && [ -s "$PLUGIN_EXTRACT/classes.jar" ]; then
@@ -393,7 +369,7 @@ jobs:
             fi
           fi
 
-          # ---- Step 3c: 混合策略剥离 (v7.5 细粒度 + 广泛前缀) ----
+          # ---- Step 3c: v8 保守全量打包 (Conservative Full Pack) ----
           #
           # ═════════════════════════════════════════════════════
           # v7.5 核心变更: 修复 kotlinx/serialization 被误删问题
@@ -418,297 +394,219 @@ jobs:
           #   io/livekit/  livekit/org/webrtc/  org/webrtc/  com/livekit/
           #   kotlinx/serialization (LiveKit JSON 序列化依赖)
           echo ""
-          echo "[Step 3c] Hybrid strip strategy (v7.5 fine-grained kotlinx)..."
+          echo "[Step 3c] v8 Conservative Full Pack (no blacklist)..."
           
-          STRIP_BEFORE=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
+          # v8: Conservative Full Pack - only remove _COROUTINE
+          TOTAL_CLASSES=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
           STRIPPED_PKGS=""
-          
-          # === 策略A: 粗粒度前缀删除 (整目录删除) ===
-          BROAD_BLACKLIST=(
-            "_COROUTINE"
-            "kotlin"
-            "androidx"
-            "android"
-            "okhttp3"
-            "okio"
-            "com/squareup"
-            "org/jetbrains"
-            "org/intellij"
-            "com/google/gson"
-            "com/google/common"
-          )
-          
-          for prefix in "${BROAD_BLACKLIST[@]}"; do
-            if [ -d "$MERGED_CLASSES/$prefix" ]; then
-              cnt=$(find "$MERGED_CLASSES/$prefix" -name "*.class" 2>/dev/null | wc -l)
-              rm -rf "$MERGED_CLASSES/$prefix" 2>/dev/null || true
-              STRIPPED_PKGS="${STRIPPED_PKGS}    ✗ $prefix/ ($cnt classes)\n"
-            fi
+
+          if [ -d "$MERGED_CLASSES/_COROUTINE" ]; then
+            coro_cnt=$(find "$MERGED_CLASSES/_COROUTINE" -name "*.class" 2>/dev/null | wc -l)
+            rm -rf "$MERGED_CLASSES/_COROUTINE" 2>/dev/null || true
+            STRIPPED_PKGS="    _COROUTINE/ ($coro_cnt classes)\n"
+          fi
+
+          FINAL_CLASSES=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
+          echo "  Merged: $TOTAL_CLASSES | Packed: $FINAL_CLASSES classes (full deps preserved)"
+          [ -n "$STRIPPED_PKGS" ] && echo -e "  Removed (known conflicts only):\n$STRIPPED_PKGS"
+
+          echo ""
+          echo "  Top-level packages in AAR:"
+          find "$MERGED_CLASSES" -maxdepth 1 -type d ! -name "." 2>/dev/null | while read pkg; do
+            pcnt=$(find "$pkg" -name "*.class" 2>/dev/null | wc -l)
+            [ "$pcnt" -gt 0 ] && echo "    $(basename $pkg)/ ($pcnt)"
           done
-          
-          # === 策略B: kotlinx 细粒度删除 (只删冲突子包) ===
-          # kotlinx 下不同子包的命运不同:
-          #   子包                    HBuilderX 有?  操作
-          #   ────────────────────────────────────────
-          #   kotlinx/coroutines     ✅ 有           删除
-          #   kotlinx/serialization  ❌ 没有         保留 (LiveKit 需要!)
-          #   kotlinx/atomicfu       ✅ 通常有       删除
-          #   kotlinx/其他未知        ?              安全起见也删除
-          KOTLINX_STRIP_SUBS=(
-            "kotlinx/coroutines"
-            "kotlinx/atomicfu"
-          )
-          KOTLINX_KEEP="kotlinx/serialization"
-          
-          echo "  [kotlinx fine-grained]:"
-          if [ -d "$MERGED_CLASSES/kotlinx" ]; then
-            # 先列出所有 kotlinx 子目录用于诊断
-            echo "    Found kotlinx sub-packages:"
-            find "$MERGED_CLASSES/kotlinx" -maxdepth 1 -type d 2>/dev/null | while read sub; do
-              scnt=$(find "$sub" -name "*.class" 2>/dev/null | wc -l)
-              echo "      $(basename $sub)/ ($scnt classes)"
-            done
-            
-            # 删除已知冲突的 kotlinx 子包
-            for ksub in "${KOTLINX_STRIP_SUBS[@]}"; do
-              if [ -d "$MERGED_CLASSES/$ksub" ]; then
-                kcnt=$(find "$MERGED_CLASSES/$ksub" -name "*.class" 2>/dev/null | wc -l)
-                rm -rf "$MERGED_CLASSES/$ksub" 2>/dev/null || true
-                STRIPPED_PKGS="${STRIPPED_PKGS}    ✗ $ksub/ ($kcnt classes)\n"
-                echo "    ✗ Removed: $ksub/ ($kcnt classes)"
-              fi
-            done
-            
-            # 验证 kotlinx/serialization 被保留
-            if [ -d "$MERGED_CLASSES/$KOTLINX_KEEP" ]; then
-              keep_cnt=$(find "$MERGED_CLASSES/$KOTLINX_KEEP" -name "*.class" 2>/dev/null | wc -l)
-              echo "    ✔ PRESERVED: $KOTLINX_KEEP/ ($keep_cnt classes) ← LiveKit needs this!"
+
+          echo ""
+          echo "[Step 3d] Critical dependency check:"
+          for dep in "io/livekit|LiveKit core" "com/livekit|Plugin" \
+                    "livekit/org/webrtc|Repackaged WebRTC" "org/webrtc|WebRTC(opt)" \
+                    "kotlinx/serialization|Serialization(JSON)" "android/javax/sdp|SDP Factory"; do
+            p="${dep%%|*}"; d="${dep##*|}"
+            if [ -d "$MERGED_CLASSES/$p" ]; then
+              c=$(find "$MERGED_CLASSES/$p" -name "*.class" 2>/dev/null | wc -l)
+              echo "  OK $p/ ($c) — $d"
             else
-              echo "    ⚠️ WARNING: $KOTLINX_KEEP/ NOT FOUND! LiveKit may crash at runtime!"
+              echo "  MISS $p/ — $d"
             fi
-          fi
+          donester]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Android SDK components
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$ANDROID_HOME/platforms/" 2>/dev/null || echo "No platforms dir yet"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0"
+          echo "Installed platforms:"
+          ls "$ANDROID_HOME/platforms/"
+
+      - name: Create uni-app SDK stub AAR
+        run: |
+          set -e
+          STUB_DIR=ci-stubs/build
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-34/android.jar"
           
-          STRIP_AFTER=$(find "$MERGED_CLASSES" -name "*.class" 2>/dev/null | wc -l)
-          STRIPPED=$((STRIP_BEFORE - STRIP_AFTER))
-          echo "  Stripped $STRIPPED classes ($STRIP_BEFORE → $STRIP_AFTER remaining)"
-          if [ -n "$STRIPPED_PKGS" ]; then
-            echo "  Removed prefix families:"
-            echo -e "$STRIPPED_PKGS"
-          fi
+          echo "=== Android JAR check ==="
+          ls -la "$ANDROID_JAR"
           
-          # 验证白名单包仍然存在
-          echo ""
-          echo "[Step 3d] Verifying whitelist packages preserved:"
-          for wp in "io/livekit" "livekit/org/webrtc" "com/livekit"; do
-            if [ -d "$MERGED_CLASSES/$wp" ]; then
-              wp_cnt=$(find "$MERGED_CLASSES/$wp" -name "*.class" 2>/dev/null | wc -l)
-              echo "  ✔ $wp/ ($wp_cnt classes)"
-            else
-              echo "  ✗ MISSING: $wp/ ⚠️"
-            fi
-          done
-          # kotlinx/serialization 是 LiveKit JSON 序列化必需的 (v7.5 关键保护!)
-          if [ -d "$MERGED_CLASSES/kotlinx/serialization" ]; then
-            ser_cnt=$(find "$MERGED_CLASSES/kotlinx/serialization" -name "*.class" 2>/dev/null | wc -l)
-            echo "  ✔ kotlinx/serialization/ (LiveKit JSON, $ser_cnt classes)"
-          else
-            echo "  ✗ CRITICAL MISSING: kotlinx/serialization/ ⚠️⚠️ LiveKit.create() 将崩溃!"
-          fi
-          # org/webrtc/ 是可选的 (标准 WebRTC，非必需)
-          if [ -d "$MERGED_CLASSES/org/webrtc" ]; then
-            wc_cnt=$(find "$MERGED_CLASSES/org/webrtc" -name "*.class" 2>/dev/null | wc -l)
-            echo "  ✔ org/webrtc/ (optional, $wc_cnt classes)"
-          else
-            echo "  ℹ org/webrtc/ not present (using livekit.org.webrtc.* instead)"
-          fi
-
-          # 打包最终 classes.jar
-          CLASSES_OUT="$WORK/classes-fat.jar"
+          mkdir -p $STUB_DIR/classes
           
-          # 补充 Step 2b 找到的独立 WebRTC Java 类 (livekit.org.webrtc.*)
-          if [ -d "$WEBRTC_DIR/java-classes" ] && [ "$(ls -A $WEBRTC_DIR/java-classes 2>/dev/null)" ]; then
-            cp -r "$WEBRTC_DIR/java-classes/"* "$MERGED_CLASSES/" 2>/dev/null || true
-            WC_JAVA_CNT=$(find "$WEBRTC_DIR/java-classes" -name "*.class" 2>/dev/null | wc -l)
-            echo "  ✓ WebRTC Java classes (livekit.org.webrtc.*): $WC_JAVA_CNT classes"
-          fi
+          echo "=== Compiling stub sources ==="
+          javac -d $STUB_DIR/classes \
+            -source 17 -target 17 \
+            -cp "$ANDROID_JAR" \
+            ci-stubs/android/*.java
           
-          # 用 zip 替代 jar cf 创建 JAR (避免 JDK 模块校验错误)
-          # JAR 本质就是 ZIP 格式
-          #
-          # v7.4 核心变更: 只打包 .class 文件，排除所有非类资源
-          # ──────────────────────────────────────────────
-          # v7.3 逐个列举 META-INF/*.version 后又遇到 DebugProbesKt.bin
-          # 这说明"打地鼠"策略永远不完 - Kotlin 库还可能包含:
-          #   - *.bin (DebugProbesKt.bin 调试探针)
-          #   - *.properties (kotlinx-coroutines 配置)
-          #   - 其他未知资源文件
-          #
-          # 终极方案: 打包时只包含 *.class 文件，其他全部丢弃
-          # 原因:
-          #   1) AAR 的 classes.jar 只需要 Java 类文件
-          #   2) 所有资源文件(META-INF, *.bin, *.version 等) 都可能与 HBuilderX 冲突
-          #   3) 这些资源对运行时非必需 (签名/清单在 AAR 外层处理)
-          (cd "$MERGED_CLASSES" && \
-            find . -name "*.class" | zip -q -r "$CLASSES_OUT" -@ )
-          CLASS_CNT=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | wc -l)
-          echo "  ✓ Final classes.jar: $(du -h $CLASSES_OUT | cut -f1) ($CLASS_CNT classes)"
+          echo "=== Creating classes.jar ==="
+          (cd $STUB_DIR/classes && jar cf ../classes.jar .)
+          
+          echo "=== Creating stub AAR ==="
+          mkdir -p $STUB_DIR/aar
+          echo '<?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.dcloud.feature.uniapp"/>' > $STUB_DIR/aar/AndroidManifest.xml
+          cp $STUB_DIR/classes.jar $STUB_DIR/aar/classes.jar
+          (cd $STUB_DIR/aar && jar cf ../../uniapp-v8-release.aar .)
+          
+          mkdir -p libs
+          cp ci-stubs/uniapp-v8-release.aar libs/
+          
+          echo "=== Stub AAR created successfully ==="
 
-          # ---- Step 4: 收集所有 .so 原生库 ----
-          JNI_OUT="$WORK/jni"
-          mkdir -p "$JNI_OUT"
-          TARGET_ABIS="arm64-v8a"
-          echo ""
-          echo "[Step 4] Collecting .so native libraries..."
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-          SO_COUNT=0
-          collect_so_from_aar() {
-            local aar_dir="$1"
-            local label="$2"
-            if [ -d "$aar_dir/jni" ]; then
-              for abi in $TARGET_ABIS; do
-                if [ -d "$aar_dir/jni/$abi" ]; then
-                  mkdir -p "$JNI_OUT/$abi"
-                  cp "$aar_dir/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
-                  ABI_CNT=$(ls "$JNI_OUT/$abi/"*.so 2>/dev/null | wc -l)
-                  SO_COUNT=$((SO_COUNT + ABI_CNT))
-                  [ "$ABI_CNT" -gt 0 ] && echo "  ✓ $abi from $label: $ABI_CNT .so"
-                fi
-              done
-            fi
-          }
+      - name: Regenerate Gradle Wrapper (fix incomplete JAR)
+        working-directory: android
+        run: |
+          echo "=== Checking gradlew wrapper ==="
+          ls -la gradlew gradle/wrapper/gradle-wrapper.jar 2>/dev/null || echo "Wrapper files missing"
+          # Use system Gradle to regenerate a correct wrapper
+          gradle wrapper --gradle-version 8.10.2 --distribution-type bin
+          chmod +x gradlew
+          echo "=== Regenerated wrapper ==="
+          ls -la gradle/wrapper/gradle-wrapper.jar
 
-          collect_so_from_aar "$LIVEKIT_DIR" "LiveKit-SDK"
-          collect_so_from_aar "$WEBRTC_DIR" "WebRTC"
-
-          # 额外搜索 Gradle cache 中其他可能含 .so 的依赖
-          for extra_dir in \
-            "$GRADLE_CACHE/modules-2/files-2.1/org/webrtc" \
-            "$GRADLE_CACHE/modules-2/files-2.1/com/github/webrtc" \
-            "$GRADLE_CACHE/modules-2/files-2.1/io/getstream"; do
-            [ -d "$extra_dir" ] || continue
-            while IFS= read -r extra_aar; do
-              [ -f "$extra_aar" ] || continue
-              EXTRA_TMP="$WORK/extra-so-tmp"
-              rm -rf "$EXTRA_TMP" && mkdir -p "$EXTRA_TMP"
-              unzip -qo "$extra_aar" -d "$EXTRA_TMP" 2>/dev/null || true
-              if [ -d "$EXTRA_TMP/jni" ]; then
-                for abi in $TARGET_ABIS; do
-                  if [ -d "$EXTRA_TMP/jni/$abi" ] && [ "$(ls $EXTRA_TMP/jni/$abi/*.so 2>/dev/null)" != "" ]; then
-                    mkdir -p "$JNI_OUT/$abi"
-                    cp "$EXTRA_TMP/jni/$abi/"*.so "$JNI_OUT/$abi/" 2>/dev/null || true
-                    EXTRA_CNT=$(ls "$EXTRA_TMP/jni/$abi/"*.so 2>/dev/null | wc -l)
-                    SO_COUNT=$((SO_COUNT + EXTRA_CNT))
-                    echo "  ✓ $abi from $(basename $extra_aar): +$EXTRA_CNT .so"
-                  fi
-                done
-              fi
-              rm -rf "$EXTRA_TMP"
-            done < <(find "$extra_dir" -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -5)
-          done
-
-          echo "  Total .so files: $SO_COUNT"
-          if [ "$SO_COUNT" -gt 0 ]; then
-            find "$JNI_OUT" -name "*.so" -exec ls -lh {} \;
-          fi
-
-          # ---- Step 5: 组装 Full Fat AAR ----
-          FAT_FINAL="$WORK/final-aar"
-          mkdir -p "$FAT_FINAL"
-          echo ""
-          echo "[Step 5] Assembling Full Fat AAR..."
-
-          [ -f "$PLUGIN_EXTRACT/AndroidManifest.xml" ] && cp "$PLUGIN_EXTRACT/AndroidManifest.xml" "$FAT_FINAL/"
-          cp "$CLASSES_OUT" "$FAT_FINAL/classes.jar"
-
-          if [ -d "$JNI_OUT" ] && [ "$(ls -A "$JNI_OUT" 2>/dev/null)" ]; then
-            cp -r "$JNI_OUT" "$FAT_FINAL/jni"
-          fi
-
-          [ -f "$PLUGIN_EXTRACT/R.txt" ] && cp "$PLUGIN_EXTRACT/R.txt" "$FAT_FINAL/"
-          [ -f "$PLUGIN_EXTRACT/proguard.txt" ] && cp "$PLUGIN_EXTRACT/proguard.txt" "$FAT_FINAL/"
-
-          (cd "$FAT_FINAL" && jar cf "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" .)
-
-          # ---- 验证 (检查 classes.jar 内部内容) ----
-          echo ""
-          echo "[Step 6] Verifying final AAR (inspecting classes.jar content)..."
-          FINAL_AAR="$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar"
-
-          # 关键修复: 之前用 unzip -l 在 AAR 层级搜索，但类嵌套在 classes.jar 内部！
-          # 正确做法: 检查 CLASSES_OUT (已经打包好的 classes.jar) 的内容
-          FINAL_LK=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "io/livekit/" | wc -l)
-          echo "  io.livekit/* entries: $FINAL_LK"
-          FINAL_WC=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "org/webrtc/" | wc -l)
-          echo "  org.webrtc/* entries: $FINAL_WC"
-          FINAL_LK_WC=$(unzip -l "$CLASSES_OUT" 2>/dev/null | grep "livekit/org/webrtc/" | wc -l)
-          echo "  livekit.org.webrtc.* entries: $FINAL_LK_WC"
-          FINAL_SO=$(unzip -l "$FINAL_AAR" 2>/dev/null | grep "\.so$" | wc -l)
-          echo "  .so files: $FINAL_SO"
-
-          # 额外诊断: 显示实际包含的顶层包
-          echo ""
-          echo "  Top-level packages in classes.jar:"
-          unzip -l "$CLASSES_OUT" 2>/dev/null | grep "\.class$" | cut -d'/' -f1-3 | sort -u | head -30
-
-          # Full Fat 模式下如果 LiveKit 类都不存在，说明 exportDeps 有问题
-          if [ "$FINAL_LK" -lt 10 ]; then
-            echo ""
-            echo "=========================================="
-            echo "  ❌ FATAL: io.livekit.* classes < 10!"
-            echo "  Full Fat AAR 缺少 LiveKit SDK 类"
-            echo "  调试信息:"
-            echo "    classes.jar 大小: $(du -h $CLASSES_OUT | cut -f1)"
-            echo "    总类数: $CLASS_CNT"
-            echo "    尝试查看 classes.jar 内容:"
-            unzip -l "$CLASSES_OUT" 2>/dev/null | head -20
-            echo "=========================================="
+      - name: Build Android AAR
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+          echo "=== Build output ==="
+          ls -la build/outputs/aar/ 2>/dev/null || { echo "ERROR: No AAR output directory found!"; exit 1; }
+          if [ ! -f build/outputs/aar/*-release.aar ]; then
+            echo "=== BUILD FAILED - No AAR found ==="
+            tail -80 build.log
             exit 1
           fi
+          echo "AAR file(s):"
+          ls -la build/outputs/aar/*-release.aar
 
-          # 警告: livekit.org.webrtc 缺失（运行时可能崩溃）
-          if [ "$FINAL_LK_WC" -lt 5 ]; then
-            echo ""
-            echo "  ⚠️ WARNING: livekit.org.webrtc.* classes < 5!"
-            echo "    LiveKit.init() 可能崩溃: NoClassDefFoundError"
-            echo "    PeerConnectionFactory\$InitializationOptions"
+      - name: Create Full Fat AAR (LiveKit + WebRTC + .so ALL IN)
+        working-directory: android
+        run: |
+          set -e
+
+          # ====== Full Fat AAR: 全量依赖自包含 v8 (保守全量打包) ======
+          # 此 AAR 包含: 插件代码 + LiveKit SDK + 全部传递依赖 + WebRTC + arm64 .so
+          # ════════════════════════════════════════════════════════════════════
+          # v8 核心变更: 废除黑名单模式，全量保留所有 .class 文件
+          # ════════════════════════════════════════════════════════════════════
+          #
+          # 黑名单模式的死胡同教训:
+          #   v7    删除 kotlinx/*     → 运行时缺 JsonKt           ❌
+          #   v7.5  保留 serialization → 运行时缺 SdpFactory       ❌
+          #   下一步? 可能还缺 livekit.org.webrtc.xxx 等...
+          #
+          # 根因: 无法预先枚举 LiveKit SDK 的所有间接依赖
+          #
+          # v8 策略: 不再主动删除任何 .class 文件!
+          #   仅删除 _COROUTINE/* (唯一确认的顶层包冲突源)
+          #   打包时只包含 *.class (避免 META-INF 资源冲突)
+          # v4/v3 修复保留:
+          #   1) Step 6 验证改为检查 classes.jar 内部内容
+          #   2) 新增策略5: 全量扫描 Gradle cache 定位 livekit.org.webrtc Java 类
+
+          ANDROID_ROOT="$(pwd)"
+          WORK="$ANDROID_ROOT/fat-aar-work"
+          SRC_AAR="$(ls $ANDROID_ROOT/build/outputs/aar/*-release.aar | head -1)"
+          
+          echo "=== Full Fat AAR Build ==="
+          echo "  Source: $(basename $SRC_AAR)"
+          echo "  Work:   $WORK"
+          
+          rm -rf "$WORK" && mkdir -p "$WORK"
+
+          # ---- Step 1: 解压插件自身 AAR ----
+          PLUGIN_EXTRACT="$WORK/plugin-extract"
+          mkdir -p "$PLUGIN_EXTRACT"
+          unzip -qo "$SRC_AAR" -d "$PLUGIN_EXTRACT"
+          echo "[Step 1] ✓ Plugin extracted"
+
+          # ---- Step 2: 定位并提取 LiveKit SDK ----
+          LIVEKIT_DIR="$WORK/livekit-sdk"
+          mkdir -p "$LIVEKIT_DIR"
+          GRADLE_CACHE="$HOME/.gradle/caches"
+          
+          echo "[Step 2] Locating LiveKit SDK in Gradle cache..."
+          
+          LIVEKIT_AAR=""
+          for search_path in \
+            "$GRADLE_CACHE/modules-2/files-2.1/io.livekit/livekit-android/2.25.1" \
+            "$GRADLE_CACHE/modules-2/files-livekit-android/io.livekit/livekit-android/2.25.1"; do
+            [ -d "$search_path" ] || continue
+            CANDIDATE=$(find "$search_path" -maxdepth 3 -name "livekit-android-*.aar" \
+              ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
+            [ -n "$CANDIDATE" ] && { LIVEKIT_AAR="$CANDIDATE"; break; }
+          done
+
+          if [ -z "$LIVEKIT_AAR" ]; then
+            LIVEKIT_AAR=$(find "$GRADLE_CACHE" -path "*livekit-android*2.25.1*" \
+              -name "*.aar" ! -name "*sources*" ! -name "*javadoc*" 2>/dev/null | head -1)
           fi
 
-          echo ""
-          echo "  ✅ Full Fat AAR 验证通过 ($CLASS_CNT classes packed)"
+          if [ -n "$LIVEKIT_AAR" ] && [ -f "$LIVEKIT_AAR" ]; then
+            unzip -qo "$LIVEKIT_AAR" -d "$LIVEKIT_DIR" 2>/dev/null || true
+            if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ ! -s "$LIVEKIT_DIR/classes.jar" ]; then
+              rm -f "$LIVEKIT_DIR/classes.jar"
+            fi
+            echo "[Step 2] ✓ LiveKit SDK found: $(basename $LIVEKIT_AAR) ($(du -h $LIVEKIT_AAR | cut -f1))"
+            ls -la "$LIVEKIT_DIR/" 2>/dev/null || true
 
-          FAT_SIZE=$(du -h "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | cut -f1)
-          CLS_SIZE=$(du -h "$CLASSES_OUT" | cut -f1)
-          JNI_SIZE=$(du -sh "$JNI_OUT" 2>/dev/null | cut -f1 || echo "0")
-          
-          echo ""
-          echo "========================================="
-          echo "  Full Fat AAR 构建完成! (v7.5 kotlinx 细粒度剥离)"
-          echo "  文件:    livekit-c2c-fat.aar"
-          echo "  总大小:  $FAT_SIZE"
-          echo "  其中:"
-          echo "    classes.jar: $CLS_SIZE ($CLASS_CNT classes)"
-          echo "    jni (.so):   ${JNI_SIZE:-0} ($FINAL_SO files)"
-          echo "  包含:"
-          echo "    - 插件代码 (com.livekit.c2ccall.*)"
-          echo "    - LiveKit SDK (io.livekit.*)"
-          [ "$FINAL_WC" -gt 0 ] && echo "    - WebRTC (org.webrtc.*)"
-          [ "$FINAL_LK_WC" -gt 0 ] && echo "    - Repackaged WebRTC (livekit.org.webrtc.*) ✅" || echo "    - ⚠️ Repackaged WebRTC: MISSING (may crash!)"
-          echo "========================================="
-          echo ""
-          echo "AAR 内容列表:"
-          unzip -l "$ANDROID_ROOT/build/outputs/aar/livekit-c2c-fat.aar" | tail -50
-
-      - name: Upload Android AAR (Fat)
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-aar
-          path: android/build/outputs/aar/livekit-c2c-fat.aar
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Confirm upload
-        if: always()
-        run: echo "Android AAR upload step completed (check above for errors)"
+            # 诊断: 检查 LiveKit SDK 自身是否已包含 livekit.org.webrtc 类
+            if [ -f "$LIVEKIT_DIR/classes.jar" ] && [ -s "$LIVEKIT_DIR/classes.jar" ]; then
+              LK_INTERNAL_WC=$(unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "livekit/org/webrtc/" | head -5)
+              LK_INTERNAL_IO=$(unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "io/livekit/" | wc -l)
+              echo "[Step 2]   Diagnostic: io.livekit.* classes in SDK: $LK_INTERNAL_IO"
+              if [ -n "$LK_INTERNAL_WC" ]; then
+                echo "[Step 2]   ✅ livekit.org.webrtc.* found INSIDE livekit-android AAR:"
+                echo "$LK_INTERNAL_WC"
+              else
+                echo "[Step 2]   ℹ livekit.org.webrtc.* NOT inside livekit-android (expected in separate artifact)"
+              fi
+              # 列出 LiveKit classes.jar 的顶层包
+              echo "[Step 2]   Top packages in livekit-android classes.jar:"
+              unzip -l "$LIVEKIT_DIR/classes.jar" 2>/dev/null | grep "\.class$" | cut -d'/' -f1-3 | sort -u | head -20
+            fi
+          else
+            echo "[Step 2] ✗ FATAL: LiveKit AAR not found!"
+            exit 1
+          fi
 
   build-ios:
     runs-on: macos-latest
