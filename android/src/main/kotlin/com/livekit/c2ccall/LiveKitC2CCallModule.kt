@@ -1,6 +1,7 @@
 package com.livekit.c2ccall
 
 import android.content.Context
+import android.os.Build
 import androidx.core.content.ContextCompat
 import android.media.MediaPlayer
 import android.util.Log
@@ -24,6 +25,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.lang.management.ManagementFactory
 
 /**
  * LiveKit 1v1 视频通话 uni-app 原生插件
@@ -34,6 +36,9 @@ class LiveKitC2CCallModule : UniModule() {
 
     companion object {
         private const val TAG = "LiveKitC2CCall"
+        
+        // v1.0.3 诊断标志：是否输出完整环境信息
+        private var sDiagnosticMode = true
     }
 
     private var room: Room? = null
@@ -50,11 +55,118 @@ class LiveKitC2CCallModule : UniModule() {
     // 协程作用域
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    // ======================== 0. 环境诊断 (v1.0.3) ========================
+    
+    /**
+     * 输出完整的设备/系统/SDK 环境信息
+     * 用于定位 Native Crash 根因
+     */
+    private fun diagnoseEnvironment(context: Context?) {
+        if (!sDiagnosticMode) return
+        
+        Log.d(TAG, "\n" + "═".repeat(60))
+        Log.d(TAG, "[DIAG] ║ LiveKit C2CCall 环境诊断 v1.0.3")
+        Log.d(TAG, "[DIAG] ║ ${"═".repeat(56)}")
+        
+        // === 基本信息 ===
+        Log.d(TAG, "[DIAG] ║ [设备信息]")
+        Log.d(TAG, "[DIAG] ║   制造商: ${Build.MANUFACTURER}")
+        Log.d(TAG, "[DIAG] ║   型号:   ${Build.MODEL}")
+        Log.d(TAG, "[DIAG] ║   产品:   ${Build.PRODUCT}")
+        Log.d(TAG, "[DIAG] ║   设备:   ${Build.DEVICE}")
+        Log.d(TAG, "[DIAG] ║   硬件:   ${Build.HARDWARE}")
+        Log.d(TAG, "[DIAG] ║   Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
+        Log.d(TAG, "[DIAG] ║   CPU ABI: ${Build.SUPPORTED_ABIS.joinToString(", ")}")
+        
+        // === 进程/线程信息 ===
+        Log.d(TAG, "[DIAG] ║ [进程信息]")
+        val runtimeMx = ManagementFactory.getRuntimeMXBean()
+        Log.d(TAG, "[DIAG] ║   JVM: ${runtimeMx.vmName} ${runtimeMx.vmVersion}")
+        Log.d(TAG, "[DIAG] ║   PID/TID: ${android.os.Process.myPid()}/${android.os.Process.myTid()}")
+        Log.d(TAG, "[DIAG] ║   主线程: ${Thread.currentThread().name} (id=${Thread.currentThread().id})")
+        Log.d(TAG, "[DIAG] ║   Looper: ${if(android.os.Looper.myLooper() != null) "OK(${android.os.Looper.getMainLooper()?.thread?.name})" else "NULL ⚠️"}")
+        
+        // === Context 信息 ===
+        Log.d(TAG, "[DIAG] ║ [Context]")
+        if (context != null) {
+            Log.d(TAG, "[DIAG] ║   类型: ${context.javaClass.simpleName}")
+            Log.d(TAG, "[DIAG] ║   包名: ${context.packageName}")
+            try {
+                val pm = context.packageManager
+                val info = pm.getPackageInfo(context.packageName, 0)
+                Log.d(TAG, "[DIAG] ║   版本名: ${info.versionName}, 版本码: ${info.versionCodeLong}")
+            } catch (_: Exception) {}
+        } else {
+            Log.w(TAG, "[DIAG] ║   ⚠️ Context 为 NULL!")
+        }
+        
+        // === LiveKit SDK 版本 ===
+        Log.d(TAG, "[DIAG] ║ [LiveKit SDK]")
+        try {
+            val lkVersion = LiveKit::class.java.`package`?.implementationVersion ?: "未知"
+            Log.d(TAG, "[DIAG] ║   版本: $lkVersion")
+        } catch (e: Exception) {
+            Log.d(TAG, "[DIAG] ║   版本获取失败: ${e.message}")
+        }
+        
+        // === WebRTC / Native 库检查 ===
+        Log.d(TAG, "[DIAG] ║ [Native 库]")
+        checkNativeLibrary("lkjingle_peerconnection_so")
+        checkNativeLibrary("jingle_peerconnection_so")
+        checkNativeLibrary("WebRTC")
+        
+        // === 权限状态 ===
+        Log.d(TAG, "[DIAG] ║ [权限]")
+        if (context != null) {
+            val permissions = mapOf(
+                "CAMERA" to android.Manifest.permission.CAMERA,
+                "RECORD_AUDIO" to android.Manifest.permission.RECORD_AUDIO,
+                "INTERNET" to android.Manifest.permission.INTERNET,
+                "MODIFY_AUDIO_SETTINGS" to android.Manifest.permission.MODIFY_AUDIO_SETTINGS
+            )
+            for ((name, perm) in permissions) {
+                val granted = ContextCompat.checkSelfPermission(context, perm)
+                Log.d(TAG, "[DIAG] ║   $name: ${if (granted == android.content.pm.PackageManager.PERMISSION_GRANTED) "✅ 已授权" else "❌ 未授权 ⚠️"}")
+            }
+        }
+        
+        // === 内存信息 ===
+        val activityManager = context?.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        if (activityManager != null) {
+            val memInfo = android.app.ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memInfo)
+            val totalMB = memInfo.totalMem / 1024 / 1024
+            val availMB = memInfo.availMem / 1024 / 1024
+            val thresholdMB = memInfo.threshold / 1024 / 1024
+            val lowMem = memInfo.lowMemory
+            Log.d(TAG, "[DIAG] ║ [内存] 总=${totalMB}MB, 可用=${availMB}MB, 阈值=${thresholdMB}MB, 低内存=$lowMem")
+        }
+        
+        Log.d(TAG, "[DIAG] ║ ${"═".repeat(56)}")
+        Log.d(TAG, "" + "═".repeat(60) + "\n")
+    }
+    
+    /**
+     * 检查 Native 库是否已加载（不触发加载）
+     */
+    private fun checkNativeLibrary(libName: String) {
+        try {
+            System.loadLibrary(libName)
+            Log.d(TAG, "[DIAG] ║   $libName: ✅ 加载成功")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.d(TAG, "[DIAG] ║   $libName: ❌ 未找到 (${e.message})")
+        } catch (e: SecurityException) {
+            Log.d(TAG, "[DIAG] ║   $libName: 🔒 安全限制")
+        }
+    }
+
     // ======================== 1. 发起 1v1 视频呼叫 ========================
 
     @UniJSMethod(uiThread = true)
     fun startC2CVideoCall(options: Map<String, Any>?, callback: UniJSCallback?) {
-        Log.d(TAG, "[DEBUG] startC2CVideoCall 被调用")
+        Log.d(TAG, "\n${"═".repeat(65)}")
+        Log.d(TAG, "[DEBUG] ══ startC2CVideoCall 被调用 ══")
+        Log.d(TAG, "${"═".repeat(65)}\n")
         if (options == null) {
             invokeError(callback, "参数不能为空")
             return
@@ -68,6 +180,9 @@ class LiveKitC2CCallModule : UniModule() {
             invokeError(callback, "wsURL 和 token 不能为空")
             return
         }
+        
+        // v1.0.3: 立即输出环境诊断（在连接前）
+        diagnoseEnvironment(null)  // 先用 null，获取 Context 后再输出一次完整版
 
         @Suppress("UNCHECKED_CAST")
         val videoOpts = options["videoOptions"] as? Map<String, Any>
@@ -97,6 +212,9 @@ class LiveKitC2CCallModule : UniModule() {
                 val appContext = getApplicationCompatible()
                     ?: throw Exception("无法获取 Context")
                 Log.d(TAG, "[DEBUG] 步骤2完成: Context=${appContext.javaClass.simpleName}")
+                
+                // v1.0.3: 获取到 Context 后输出完整环境诊断
+                diagnoseEnvironment(appContext)
 
                 Log.d(TAG, "[DEBUG] 步骤3: 调用 LiveKit.init（SDK 内部自动加载 lkjingle_peerconnection_so 原生库）")
                 LiveKit.init(appContext)
@@ -249,13 +367,15 @@ class LiveKitC2CCallModule : UniModule() {
     @UniJSMethod(uiThread = true)
     fun enableVideo(enable: Boolean) {
         isVideoEnabled = enable
-        Log.d(TAG, "[enableVideo] 被调用: enable=$enable")
+        Log.d(TAG, "[JS-CALL] ══ enableVideo(enable=$enable) ══ [thread=${Thread.currentThread().name}]")
+        Log.d(TAG, "[JS-CALL] room=${if(room!=null)"OK" else "NULL"}, lp=${room?.localParticipant?.identity}")
 
         scope.launch(Dispatchers.Main) {
             safeEnableCamera(enable)
         }
 
         announceForAccessibility(if (enable) "摄像头已开启" else "摄像头已关闭")
+        Log.d(TAG, "[JS-CALL] ══ enableVideo 返回 (异步执行中)")
     }
 
     // ======================== 5. 开关麦克风 ========================
@@ -263,22 +383,23 @@ class LiveKitC2CCallModule : UniModule() {
     @UniJSMethod(uiThread = true)
     fun enableAudio(enable: Boolean) {
         isAudioEnabled = enable
-        Log.d(TAG, "[enableAudio] 被调用: enable=$enable")
+        Log.d(TAG, "[JS-CALL] ══ enableAudio(enable=$enable) ══ [thread=${Thread.currentThread().name}]")
+        Log.d(TAG, "[JS-CALL] room=${if(room!=null)"OK" else "NULL"}, lp=${room?.localParticipant?.identity}")
+        Log.d(TAG, "[JS-CALL] ⚠️ 此方法会调用 setMicrophoneEnabled，已知在部分设备触发 Native SIGSEGV!")
 
         scope.launch(Dispatchers.Main) {
             safeEnableMicrophone(enable)
         }
 
         announceForAccessibility(if (enable) "麦克风已开启" else "麦克风已关闭")
+        Log.d(TAG, "[JS-CALL] ══ enableAudio 返回 (异步执行中)")
     }
 
     // ======================== 6. 切换前后摄像头 ========================
 
     @UniJSMethod(uiThread = true)
     fun switchCamera(position: String?) {
-        Log.d(TAG, "[switchCamera] 被调用: position=$position")
-        // LiveKit SDK 2.x 摄像头切换通过 TrackPublishOptions 或重新发布轨道实现
-        // 使用安全方法替代直接调用
+        Log.d(TAG, "[JS-CALL] ══ switchCamera(position=$position) ══ [thread=${Thread.currentThread().name}]")
         val newEnableState = !isVideoEnabled
         isVideoEnabled = newEnableState
         
@@ -288,6 +409,7 @@ class LiveKitC2CCallModule : UniModule() {
 
         val msg = if ("back" == position) "已切换到后置摄像头" else "已切换到前置摄像头"
         announceForAccessibility(msg)
+        Log.d(TAG, "[JS-CALL] ══ switchCamera 返回 (异步执行中)")
     }
 
     // ======================== 7. 视频渲染器管理 ========================
@@ -647,16 +769,26 @@ class LiveKitC2CCallModule : UniModule() {
      * 当 setCameraEnabled(true) 成功后会触发 LocalTrackPublished 事件
      */
     private fun observeLocalParticipant(local: LocalParticipant) {
-        Log.d(TAG, "[LOCAL] 开始监听本地参与者轨道事件...")
+        Log.d(TAG, "[LOCAL] ── 开始监听本地参与者轨道事件... lp=${local.identity} ──")
         scope.launch {
             try {
                 local.events.events.collect { event: ParticipantEvent ->
-                    Log.d(TAG, "[LOCAL] 收到 LocalParticipantEvent: ${event::class.simpleName}")
+                    val eventTime = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
+                    val eventName = event::class.simpleName
+                    
+                    // StateChanged 是崩溃前的最后一个事件 - 特别标记！
+                    if (eventName == "StateChanged") {
+                        Log.w(TAG, "[LOCAL][$eventTime] ⚠️⚠️⚠️ StateChanged! ⚠️⚠️⚠️")
+                        try { Log.d(TAG, "[LOCAL] 详情: ${event.toString()}") } catch (_: Exception) {}
+                        Log.d(TAG, "[LOCAL] room=${if(room!=null)"OK" else "NULL"}, lp=${room?.localParticipant?.identity}")
+                    } else {
+                        Log.d(TAG, "[LOCAL][$eventTime] 事件: $eventName")
+                    }
+                    
                     when (event) {
                         is ParticipantEvent.LocalTrackPublished -> {
                             Log.d(TAG, "[LOCAL] ✅ LocalTrackPublished: kind=${event.publication.kind}, sid=${event.publication.sid}")
                             if (event.publication.kind == Track.Kind.VIDEO) {
-                                // 自动绑定本地视频到 local renderer
                                 val localRenderer = LiveKitVideoView.localViewInstance?.getRenderer()
                                 if (localRenderer != null) {
                                     bindTrackToRenderer(event.publication, localRenderer)
@@ -675,12 +807,12 @@ class LiveKitC2CCallModule : UniModule() {
                             Log.d(TAG, "[LOCAL] TrackUnpublished: kind=${event.publication.kind}")
                         }
                         else -> {
-                            Log.d(TAG, "[LOCAL] 未处理的本地事件: ${event::class.simpleName}")
+                            Log.d(TAG, "[LOCAL] 未处理的本地事件: $eventName")
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "[LOCAL] ❌ 本地参与者事件监听异常: ${e.message}", e)
+                Log.e(TAG, "[LOCAL] ❌ 本地参与者事件监听异常: ${e.javaClass.name}: ${e.message}", e)
             }
         }
     }
@@ -933,96 +1065,107 @@ class LiveKitC2CCallModule : UniModule() {
     }
 
     // ======================== 安全媒体启用方法 ========================
-    // ⚠️ v1.0.2: setMicrophoneEnabled/setCameraEnabled 在部分设备触发 Native SIGSEGV
-    // 这些方法提供超时保护 + 细粒度日志 + 安全降级
+    // v1.0.3: 增强诊断 - 完整状态快照 + 调用栈追踪 + Native Crash 定位
 
     /**
-     * 安全启用/禁用麦克风（带 Native Crash 保护）
+     * 安全启用/禁用麦克风（带 Native Crash 保护 + 详尽诊断）
      */
     private suspend fun safeEnableMicrophone(enable: Boolean) {
+        val startTime = System.currentTimeMillis()
         val local = room?.localParticipant
-        Log.d(TAG, "[MIC] safeEnableMicrophone: enable=$enable, lp=${local?.identity}, currentMic=${local?.isMicrophoneEnabled}")
+        Log.d(TAG, "\n[MIC] ── safeEnableMicrophone($enable) at ${java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())}")
+        Log.d(TAG, "[MIC] thread=${Thread.currentThread().name}, looper=${if(android.os.Looper.myLooper() != null) "OK" else "NULL"}")
         
-        if (local == null) {
-            Log.w(TAG, "[MIC] ❌ localParticipant 为 null，跳过")
-            sendEvent("onError", "麦克风操作失败: 未连接到房间")
-            return
-        }
-        if (local.isMicrophoneEnabled == enable) {
-            Log.d(TAG, "[MIC] ⏭️ 麦克风状态已是 $enable，跳过")
-            return
-        }
+        if (room == null) { Log.w(TAG, "[MIC] ❌ room=null"); sendEvent("onError", "麦克风操作失败: 未连接"); return }
+        if (local == null) { Log.w(TAG, "[MIC] ❌ lp=null"); sendEvent("onError", "麦克风操作失败: lp不存在"); return }
+        Log.d(TAG, "[MIC] lp=${local.identity}, currentMic=${local.isMicrophoneEnabled}")
+        
+        if (local.isMicrophoneEnabled == enable) { Log.d(TAG, "[MIC] ⏭️ skip"); return }
 
         try {
-            // 使用独立线程执行 + 超时保护
             val result = withTimeoutOrNull(8000L) {
-                Log.d(TAG, "[MIC] >>> 调用 setMicrophoneEnabled($enable) <<< [thread=${Thread.currentThread().name}]")
+                val preMs = System.currentTimeMillis() - startTime
+                Log.d(TAG, "[MIC] [${preMs}ms] calling setMicrophoneEnabled($enable)...")
+                
+                if (sDiagnosticMode) {
+                    Thread.currentThread().stackTrace.slice(4 until minOf(14, Thread.currentThread().stackTrace.size))
+                        .forEachIndexed { i, s -> Log.d(TAG, "[MIC]   stack[$i]: ${s.className}.${s.methodName}(${s.lineNumber})") }
+                }
+                
                 local.setMicrophoneEnabled(enable)
-                Log.d(TAG, "[MIC] <<< setMicrophoneEnabled($enable) 已返回 >>>")
+                val postMs = System.currentTimeMillis() - startTime
+                Log.d(TAG, "[MIC] [${postMs}ms] setMicrophoneEnabled returned! (native took ${postMs - preMs}ms)")
                 true
             }
             
             when {
                 result == true -> {
-                    Log.d(TAG, "[MIC] ✅ 麦克风 ${if(enable)"开启" else "关闭"} 成功 (actual=${local.isMicrophoneEnabled})")
+                    val elapsed = System.currentTimeMillis() - startTime
+                    Log.d(TAG, "[MIC] ✅ mic ${if(enable)"ON" else "OFF"} ok in ${elapsed}ms, actual=${local.isMicrophoneEnabled}")
                     sendEvent("onAudioStateChanged", if(enable) "mic_on" else "mic_off")
                 }
                 else -> {
-                    Log.e(TAG, "[MIC] ⚠️ 操作超时 (8s)，可能 Native 层卡死或崩溃")
-                    sendEvent("onError", "麦克风操作超时(8s)，设备可能不支持")
+                    Log.e(TAG, "[MIC] ❌ TIMEOUT(8s)! roomValid=${room!=null}, lpValid=${room?.localParticipant!=null}")
+                    sendEvent("onError", "麦克风超时(8s), 可能Native崩溃")
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[MIC] ❌ Java 异常: ${e.javaClass.simpleName}: ${e.message}", e)
-            sendEvent("onError", "麦克风异常: ${e.message}")
+            Log.e(TAG, "[MIC] 💥 JavaExc(${System.currentTimeMillis()-startTime}ms): ${e.javaClass.name}: ${e.message}", e)
+            sendEvent("onError", "麦克风Java异常: ${e.message}")
         } catch (e: Throwable) {
-            Log.e(TAG, "[MIC] 💥 致命错误(Native?): ${e.javaClass.simpleName}: ${e.message}")
+            Log.e(TAG, "[MIC] ☠️ FATAL(${System.currentTimeMillis()-startTime}ms): ${e.javaClass.name}: ${e.message}")
             sendEvent("onFatalError", "Native层错误(MIC): ${e.javaClass.simpleName}")
         }
     }
 
     /**
-     * 安全启用/禁用摄像头（带 Native Crash 保护）
+     * 安全启用/禁用摄像头（带 Native Crash 保护 + 详尽诊断）
      */
     private suspend fun safeEnableCamera(enable: Boolean) {
+        val startTime = System.currentTimeMillis()
         val local = room?.localParticipant
-        Log.d(TAG, "[CAM] safeEnableCamera: enable=$enable, lp=${local?.identity}, currentCam=${local?.isCameraEnabled}")
-
-        if (local == null) {
-            Log.w(TAG, "[CAM] ❌ localParticipant 为 null，跳过")
-            sendEvent("onError", "摄像头操作失败: 未连接到房间")
-            return
-        }
-        if (local.isCameraEnabled == enable) {
-            Log.d(TAG, "[CAM] ⏭️ 摄像头状态已是 $enable，跳过")
-            return
-        }
+        Log.d(TAG, "\n[CAM] ── safeEnableCamera($enable) at ${java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())}")
+        Log.d(TAG, "[CAM] thread=${Thread.currentThread().name}, looper=${if(android.os.Looper.myLooper() != null) "OK" else "NULL"}")
+        
+        if (room == null) { Log.w(TAG, "[CAM] ❌ room=null"); sendEvent("onError", "摄像头操作失败: 未连接"); return }
+        if (local == null) { Log.w(TAG, "[CAM] ❌ lp=null"); sendEvent("onError", "摄像头操作失败: lp不存在"); return }
+        Log.d(TAG, "[CAM] lp=${local.identity}, currentCam=${local.isCameraEnabled}")
+        
+        if (local.isCameraEnabled == enable) { Log.d(TAG, "[CAM] ⏭️ skip"); return }
 
         try {
             val result = withTimeoutOrNull(12000L) {
-                Log.d(TAG, "[CAM] >>> 调用 setCameraEnabled($enable) <<< [thread=${Thread.currentThread().name}, Looper=${if(android.os.Looper.myLooper() != null) "OK" else "NULL"}]")
+                val preMs = System.currentTimeMillis() - startTime
+                Log.d(TAG, "[CAM] [${preMs}ms] calling setCameraEnabled($enable)...")
+                
+                if (sDiagnosticMode) {
+                    Thread.currentThread().stackTrace.slice(4 until minOf(14, Thread.currentThread().stackTrace.size))
+                        .forEachIndexed { i, s -> Log.d(TAG, "[CAM]   stack[$i]: ${s.className}.${s.methodName}(${s.lineNumber})") }
+                }
+                
                 local.setCameraEnabled(enable)
-                Log.d(TAG, "[CAM] <<< setCameraEnabled($enable) 已返回 >>>")
+                val postMs = System.currentTimeMillis() - startTime
+                Log.d(TAG, "[CAM] [${postMs}ms] setCameraEnabled returned! (native took ${postMs - preMs}ms)")
                 true
             }
             
             when {
                 result == true -> {
-                    Log.d(TAG, "[CAM] ✅ 摄像头 ${if(enable)"开启" else "关闭"} 成功 (actual=${local.isCameraEnabled})")
+                    val elapsed = System.currentTimeMillis() - startTime
+                    Log.d(TAG, "[CAM] ✅ cam ${if(enable)"ON" else "OFF"} ok in ${elapsed}ms, actual=${local.isCameraEnabled}")
                     sendEvent("onVideoStateChanged", if(enable) "cam_on" else "cam_off")
-                    // 如果开启了摄像头，尝试绑定到本地渲染器
                     if (enable) bindLocalVideoIfNeeded()
                 }
                 else -> {
-                    Log.e(TAG, "[CAM] ⚠️ 操作超时 (12s)，可能 Native 层卡死或崩溃")
-                    sendEvent("onError", "摄像头操作超时(12s)，设备可能不支持")
+                    Log.e(TAG, "[CAM] ❌ TIMEOUT(12s)! roomValid=${room!=null}, lpValid=${room?.localParticipant!=null}")
+                    sendEvent("onError", "摄像头超时(12s), 可能Native崩溃")
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[CAM] ❌ Java 异常: ${e.javaClass.simpleName}: ${e.message}", e)
-            sendEvent("onError", "摄像头异常: ${e.message}")
+            Log.e(TAG, "[CAM] 💥 JavaExc(${System.currentTimeMillis()-startTime}ms): ${e.javaClass.name}: ${e.message}", e)
+            sendEvent("onError", "摄像头Java异常: ${e.message}")
         } catch (e: Throwable) {
-            Log.e(TAG, "[CAM] 💥 致命错误(Native?): ${e.javaClass.simpleName}: ${e.message}")
+            Log.e(TAG, "[CAM] ☠️ FATAL(${System.currentTimeMillis()-startTime}ms): ${e.javaClass.name}: ${e.message}")
             sendEvent("onFatalError", "Native层错误(CAM): ${e.javaClass.simpleName}")
         }
     }
