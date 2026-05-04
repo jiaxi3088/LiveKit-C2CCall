@@ -10,6 +10,7 @@ import android.view.accessibility.AccessibilityManager
 import io.dcloud.feature.uniapp.annotation.UniJSMethod
 import io.dcloud.feature.uniapp.bridge.UniJSCallback
 import io.dcloud.feature.uniapp.common.UniModule
+import io.livekit.android.ConnectOptions
 import io.livekit.android.LiveKit
 import io.livekit.android.events.ParticipantEvent
 import io.livekit.android.events.RoomEvent
@@ -38,6 +39,51 @@ class LiveKitC2CCallModule : UniModule() {
         
         // v1.0.3 诊断标志：是否输出完整环境信息
         private var sDiagnosticMode = true
+
+        /**
+         * v1.0.4: 检测当前设备是否为 HarmonyOS / Huawei / Honor 兼容性问题设备
+         * 
+         * 已知问题：HarmonyOS 3.0+ (基于 Android 10/12) 的 Audio HAL 与 WebRTC Native 库不兼容，
+         * 导致 AudioDeviceModule 初始化时触发 SIGSEGV 崩溃。
+         * 
+         * 检测条件（满足任一即标记为兼容模式）：
+         * - 制造商为 HUAWEI 或 HONOR
+         * - 系统属性包含 harmonyos 关键字
+         */
+        @JvmStatic
+        fun isHarmonyOSDevice(): Boolean {
+            return try {
+                val manufacturer = Build.MANUFACTURER.uppercase()
+                val brand = Build.BRAND.uppercase()
+                val isHuaweiHonor = manufacturer.contains("HUAWEI") || manufacturer.contains("HONOR") ||
+                                   brand.contains("HUAWEI") || brand.contains("HONOR")
+                
+                // 额外检测：通过系统属性判断是否为 HarmonyOS
+                var isHarmonyByProp = false
+                try {
+                    val prop = java.lang.Runtime.getRuntime().exec(arrayOf("getprop", "ro.build.version.emui"))
+                    val output = prop.inputStream.bufferedReader().readText()
+                    isHarmonyByProp = output.uppercase().contains("HARMONY") || 
+                                      output.uppercase().contains("EMUI")
+                } catch (_: Exception) {}
+                
+                val result = isHuaweiHonor || isHarmonyByProp
+                if (result) {
+                    Log.w(TAG, "[HARMONY] 🔴 检测到 HarmonyOS/Huawei/Honor 设备 (mfr=$manufacturer, brand=$brand)")
+                    Log.w(TAG, "[HARMONY] 将启用兼容模式：禁用 SDK 自动音频初始化")
+                } else {
+                    Log.i(TAG, "[HARMONY] 🟢 标准Android设备 (mfr=$manufacturer, brand=$brand)")
+                }
+                result
+            } catch (e: Exception) {
+                Log.w(TAG, "[HARMONY] 设备检测异常: ${e.message}")
+                false
+            }
+        }
+
+        /** v1.0.4 缓存检测结果 */
+        @JvmStatic var sIsHarmonyOS: Boolean? = null
+            private set
     }
 
     private var room: Room? = null
@@ -242,8 +288,26 @@ class LiveKitC2CCallModule : UniModule() {
                 }
 
                 Log.d(TAG, "[DEBUG] 步骤6: room.connect 开始, wsURL=$wsURL")
+                
+                // v1.0.4: HarmonyOS 兼容模式
+                sIsHarmonyOS = isHarmonyOSDevice()
+                if (sIsHarmonyOS == true) {
+                    Log.w(TAG, "[HARMONY] ⚠️ 使用 HarmonyOS 兼容模式连接")
+                }
+                
+                // v1.0.4: 显式传入 ConnectOptions，完全控制 SDK 行为
+                // audio=false: 不自动发布音频轨道（避免触发 AudioDeviceModule 初始化）
+                // video=false: 不自动发布视频轨道（避免触发 VideoCapturer 初始化）
+                // autoSubscribe: HarmonyOS设备上设为false以最小化操作
+                val connectOpts = ConnectOptions(
+                    audio = false,
+                    video = false,
+                    autoSubscribe = sIsHarmonyOS != true  // 非HarmonyOS设备才自动订阅
+                )
+                Log.d(TAG, "[DEBUG] ConnectOptions: audio=${connectOpts.audio}, video=${connectOpts.video}, autoSubscribe=${connectOpts.autoSubscribe}")
+                
                 // 连接到房间（suspend fun，会挂起直到断开连接）
-                room!!.connect(wsURL, token)
+                room!!.connect(wsURL, token, connectOpts)
                 Log.d(TAG, "[DEBUG] 步骤6完成: room.connect 成功")
 
                 // ===== 步骤7: 初始化视频渲染 + 发布本地媒体 + 订阅远端媒体 =====
@@ -331,7 +395,17 @@ class LiveKitC2CCallModule : UniModule() {
                 }
 
                 Log.d(TAG, "[DEBUG] answerC2C 步骤6: room.connect 开始, wsURL=$wsURL")
-                room!!.connect(wsURL, token)
+                
+                // v1.0.4: HarmonyOS 兼容模式（复用检测结果或重新检测）
+                if (sIsHarmonyOS == null) sIsHarmonyOS = isHarmonyOSDevice()
+                val connectOpts = ConnectOptions(
+                    audio = false,
+                    video = false,
+                    autoSubscribe = sIsHarmonyOS != true
+                )
+                Log.d(TAG, "[DEBUG] answer ConnectOptions: audio=${connectOpts.audio}, autoSubscribe=${connectOpts.autoSubscribe}")
+                
+                room!!.connect(wsURL, token, connectOpts)
                 Log.d(TAG, "[DEBUG] answerC2C 步骤6完成: room.connect 成功")
 
                 // ===== 步骤7: 初始化视频渲染 + 发布本地媒体 + 订阅远端媒体 =====
@@ -775,10 +849,40 @@ class LiveKitC2CCallModule : UniModule() {
                     val eventName = event::class.simpleName
                     
                     // StateChanged 是崩溃前的最后一个事件 - 特别标记！
+                    // v1.0.4: 输出完整状态快照以定位 SIGSEGV 触发点
                     if (eventName == "StateChanged") {
                         Log.w(TAG, "[LOCAL][$eventTime] ⚠️⚠️⚠️ StateChanged! ⚠️⚠️⚠️")
                         try { Log.d(TAG, "[LOCAL] 详情: ${event.toString()}") } catch (_: Exception) {}
                         Log.d(TAG, "[LOCAL] room=${if(room!=null)"OK" else "NULL"}, lp=${room?.localParticipant?.identity}")
+                        
+                        // v1.0.4: 输出 LocalParticipant 完整状态快照
+                        try {
+                            val lp = room?.localParticipant
+                            if (lp != null) {
+                                Log.w(TAG, "[LOCAL][STATE] ════════════════════════════")
+                                Log.w(TAG, "[LOCAL][STATE] identity=${lp.identity}")
+                                // 通过反射获取更多状态信息
+                                try {
+                                    val isMicEnabled = lp.javaClass.getMethod("isMicrophoneEnabled").invoke(lp)
+                                    Log.w(TAG, "[LOCAL][STATE] isMicrophoneEnabled=$isMicEnabled")
+                                } catch (_: Exception) { Log.w(TAG, "[LOCAL][STATE] isMicEnabled=? (反射失败)") }
+                                try {
+                                    val isCamEnabled = lp.javaClass.getMethod("isCameraEnabled").invoke(lp)
+                                    Log.w(TAG, "[LOCAL][STATE] isCameraEnabled=$isCamEnabled")
+                                } catch (_: Exception) { Log.w(TAG, "[LOCAL][STATE] isCamEnabled=? (反射失败)") }
+                                try {
+                                    val trackPublications = lp.trackPublications
+                                    Log.w(TAG, "[LOCAL][STATE] trackPublications count=${trackPublications.size}")
+                                    trackPublications.forEach { (_, pub) ->
+                                        Log.w(TAG, "[LOCAL][STATE]   - track: kind=${pub.kind}, sid=${pub.sid}, muted=${pub.isMuted}")
+                                    }
+                                } catch (_: Exception) {}
+                                Log.w(TAG, "[LOCAL][STATE] sIsHarmonyOS=$sIsHarmonyOS")
+                                Log.w(TAG, "[LOCAL][STATE] ════════════════════════════")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[LOCAL][STATE] 状态快照异常: ${e.message}")
+                        }
                     } else {
                         Log.d(TAG, "[LOCAL][$eventTime] 事件: $eventName")
                     }
