@@ -25,7 +25,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import java.lang.management.ManagementFactory
 
 /**
  * LiveKit 1v1 视频通话 uni-app 原生插件
@@ -80,8 +79,7 @@ class LiveKitC2CCallModule : UniModule() {
         
         // === 进程/线程信息 ===
         Log.d(TAG, "[DIAG] ║ [进程信息]")
-        val runtimeMx = ManagementFactory.getRuntimeMXBean()
-        Log.d(TAG, "[DIAG] ║   JVM: ${runtimeMx.vmName} ${runtimeMx.vmVersion}")
+        Log.d(TAG, "[DIAG] ║   JVM: ${System.getProperty("java.vm.name")} ${System.getProperty("java.vm.version")}")
         Log.d(TAG, "[DIAG] ║   PID/TID: ${android.os.Process.myPid()}/${android.os.Process.myTid()}")
         Log.d(TAG, "[DIAG] ║   主线程: ${Thread.currentThread().name} (id=${Thread.currentThread().id})")
         Log.d(TAG, "[DIAG] ║   Looper: ${if(android.os.Looper.myLooper() != null) "OK(${android.os.Looper.getMainLooper()?.thread?.name})" else "NULL ⚠️"}")
@@ -94,7 +92,7 @@ class LiveKitC2CCallModule : UniModule() {
             try {
                 val pm = context.packageManager
                 val info = pm.getPackageInfo(context.packageName, 0)
-                Log.d(TAG, "[DIAG] ║   版本名: ${info.versionName}, 版本码: ${info.versionCodeLong}")
+                Log.d(TAG, "[DIAG] ║   版本名: ${info.versionName}, 版本码: ${info.versionCode}")
             } catch (_: Exception) {}
         } else {
             Log.w(TAG, "[DIAG] ║   ⚠️ Context 为 NULL!")
